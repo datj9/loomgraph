@@ -50,6 +50,22 @@ export class CheckpointStore {
     return JSON.parse(readFileSync(path, "utf8")) as RunState;
   }
 
+  /**
+   * The graph is copied into the run directory when the run starts, so `lg
+   * resume` continues against the exact graph the run began with even if the
+   * source file has since changed.
+   */
+  saveGraphSource(runId: string, source: string): void {
+    mkdirSync(this.runDir(runId), { recursive: true });
+    writeFileSync(join(this.runDir(runId), "graph.yaml"), source, "utf8");
+  }
+
+  loadGraphSource(runId: string): string | null {
+    const path = join(this.runDir(runId), "graph.yaml");
+    if (!existsSync(path)) return null;
+    return readFileSync(path, "utf8");
+  }
+
   list(): string[] {
     if (!existsSync(this.rootDir)) return [];
     return readdirSync(this.rootDir, { withFileTypes: true })

@@ -106,6 +106,28 @@ export function readySet(graph: Graph, state: RunState): string[] {
   });
 }
 
+/**
+ * The batches the scheduler would dispatch, in order. Pure - used by
+ * `lg run --dry-run`, which must not spawn anything.
+ */
+export function planLevels(graph: Graph): string[][] {
+  const state = newRunState(graph, { runId: "plan", cwd: "." });
+  const levels: string[][] = [];
+
+  while (true) {
+    const ready = readySet(graph, state);
+    if (ready.length === 0) return levels;
+    levels.push(ready);
+    for (const id of ready) {
+      state.nodes[id] = {
+        nodeId: id, status: "succeeded", startedAt: "", endedAt: null,
+        attempts: 1, output: "", error: null, costUsd: 0,
+      };
+    }
+    state.completed = [...state.completed, ...ready];
+  }
+}
+
 export function endReached(graph: Graph, state: RunState): boolean {
   return graph.edges.some((edge) => edge.to.includes(END) && predicateHolds(edge, state));
 }
