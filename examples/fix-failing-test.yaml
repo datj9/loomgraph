@@ -1,0 +1,56 @@
+# The full pipeline: two Claude Code runs, two shell checks in parallel, and a
+# Codex review that has to say PASS. This one does spend money - the budget
+# block is the ceiling, enforced before every dispatch.
+#
+#   lg run examples/fix-failing-test.yaml --var ticket="LG-42: flaky retry test"
+#
+name: fix-failing-test
+
+budget:
+  maxUsd: 2.00
+  maxWallClockSec: 1800
+  maxNodeRuns: 20
+
+vars:
+  ticket: ""
+
+nodes:
+  reproduce:
+    type: agent
+    adapter: claude
+    prompt: "Reproduce the failure described in: {{vars.ticket}}. Do not fix it. Report the failing test name."
+    maxTurns: 8
+
+  fix:
+    type: agent
+    adapter: claude
+    prompt: "Fix the failure. Ticket: {{vars.ticket}}. Repro notes: {{nodes.reproduce.output}}"
+    maxTurns: 20
+    retries: 1
+
+  test:
+    type: command
+    run: "npm test"
+    timeoutSec: 600
+
+  lint:
+    type: command
+    run: "npm run lint --if-present"
+    timeoutSec: 600
+
+  review:
+    type: verifier
+    adapter: codex
+    prompt: "Review the diff for correctness and missing tests. Reply PASS or FAIL with reasons."
+    pass: "PASS"
+
+edges:
+  - from: reproduce
+    to: fix
+  - from: fix
+    to: [test, lint] # fan-out
+  - from: [test, lint] # fan-in, deterministic merge
+    to: review
+    when: all_succeeded
+  - from: review
+    to: END

@@ -1,0 +1,45 @@
+# Fan-out: one node splits into three checks that run concurrently, then a
+# merge node waits for all three. Still zero model cost - every node is a
+# shell command. `--if-present` keeps it working in repos that lack a script.
+#
+#   lg run examples/parallel-verify.yaml
+#
+name: parallel-verify
+
+budget:
+  maxUsd: 0.01
+  maxWallClockSec: 900
+  maxNodeRuns: 10
+
+nodes:
+  prepare:
+    type: command
+    run: "echo 'verifying the working tree'"
+
+  test:
+    type: command
+    run: "npm run test --if-present"
+    timeoutSec: 600
+
+  lint:
+    type: command
+    run: "npm run lint --if-present"
+    timeoutSec: 600
+
+  typecheck:
+    type: command
+    run: "npm run typecheck --if-present"
+    timeoutSec: 600
+
+  merge:
+    type: command
+    run: "echo 'test, lint and typecheck all passed'"
+
+edges:
+  - from: prepare
+    to: [test, lint, typecheck] # fan-out: dispatched concurrently
+  - from: [test, lint, typecheck] # fan-in: waits for all three
+    to: merge
+    when: all_succeeded
+  - from: merge
+    to: END

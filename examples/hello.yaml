@@ -1,0 +1,31 @@
+# The 60-second quickstart: three shell commands, no model calls, zero cost.
+#
+#   lg run examples/hello.yaml
+#
+name: hello
+
+budget:
+  maxUsd: 0.01 # nothing here calls a model, so nothing is ever spent
+  maxWallClockSec: 60
+  maxNodeRuns: 5
+
+nodes:
+  greet:
+    type: command
+    run: "echo 'hello from loomgraph'"
+
+  where:
+    type: command
+    run: "echo \"running in $(pwd)\""
+
+  done:
+    type: command
+    run: "echo 'the graph finished - try: lg ls'"
+
+edges:
+  - from: greet
+    to: where
+  - from: where
+    to: done
+  - from: done
+    to: END
