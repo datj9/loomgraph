@@ -78,6 +78,25 @@ export function parseCodexJsonl(stdout: string): AdapterOutput {
   return { ok: true, text, costUsd, raw: events, error: null };
 }
 
+/**
+ * Decide the final result once the process has exited. Kept separate from
+ * `run` so the exit-code policy is unit-testable without spawning codex.
+ */
+export function decideCodexResult(parsed: AdapterOutput, exitCode: number | undefined, stderr: string): AdapterOutput {
+  const trimmed = stderr.trim();
+  const failed = exitCode !== 0 && exitCode !== undefined;
+
+  // A non-zero exit means the run did not complete, even when a partial agent
+  // message made it into the stream. Do not report that as success.
+  if (parsed.ok && failed) {
+    return { ...parsed, ok: false, error: `codex exited ${exitCode}${trimmed ? `: ${trimmed}` : ""}` };
+  }
+  if (!parsed.ok && failed && trimmed) {
+    return { ...parsed, error: `${parsed.error} (exit ${exitCode}: ${trimmed})` };
+  }
+  return parsed;
+}
+
 export class CodexAdapter implements Adapter {
   readonly name = "codex";
 
@@ -97,10 +116,6 @@ export class CodexAdapter implements Adapter {
       return { ok: false, text: stdout, costUsd: 0, raw: { stdout, stderr }, error: `timeout after ${input.timeoutSec}s` };
     }
 
-    const parsed = parseCodexJsonl(stdout);
-    if (!parsed.ok && result.exitCode !== 0 && stderr.trim()) {
-      return { ...parsed, error: `${parsed.error} (exit ${result.exitCode}: ${stderr.trim()})` };
-    }
-    return parsed;
+    return decideCodexResult(parseCodexJsonl(stdout), result.exitCode, stderr);
   }
 }

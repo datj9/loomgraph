@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildCodexArgs, parseCodexJsonl } from "./codex.js";
+import { buildCodexArgs, decideCodexResult, parseCodexJsonl } from "./codex.js";
 
 const EVENTS = [
   `{"id":"0","msg":{"type":"task_started"}}`,
@@ -66,5 +66,31 @@ describe("parseCodexJsonl", () => {
     const out = parseCodexJsonl(EVENTS);
     expect(Array.isArray(out.raw)).toBe(true);
     expect((out.raw as unknown[]).length).toBe(4);
+  });
+});
+
+describe("decideCodexResult", () => {
+  it("fails a non-zero exit even when an agent message was streamed", () => {
+    // A partial message plus a crash is not a successful run.
+    const parsed = parseCodexJsonl(EVENTS);
+    expect(parsed.ok).toBe(true); // the parser alone sees a valid message
+    const decided = decideCodexResult(parsed, 1, "boom");
+    expect(decided.ok).toBe(false);
+    expect(decided.error).toMatch(/exited 1/);
+    expect(decided.error).toMatch(/boom/);
+  });
+
+  it("keeps a successful parse successful on exit 0", () => {
+    const decided = decideCodexResult(parseCodexJsonl(EVENTS), 0, "");
+    expect(decided.ok).toBe(true);
+    expect(decided.text).toBe("final answer");
+  });
+
+  it("annotates an already-failed parse with the exit code and stderr", () => {
+    const parsed = parseCodexJsonl(`{"msg":{"type":"task_started"}}`);
+    const decided = decideCodexResult(parsed, 2, "auth expired");
+    expect(decided.ok).toBe(false);
+    expect(decided.error).toMatch(/no agent message/i);
+    expect(decided.error).toMatch(/auth expired/);
   });
 });

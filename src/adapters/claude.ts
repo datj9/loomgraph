@@ -38,6 +38,20 @@ export function parseClaudeJson(stdout: string): AdapterOutput {
   const text = typeof obj.result === "string" ? obj.result : "";
   const subtype = typeof obj.subtype === "string" ? obj.subtype : "unknown";
 
+  // Claude Code can report `subtype: "success"` while `is_error` is true - an
+  // expired OAuth session comes back exactly that way. Trusting subtype alone
+  // makes an auth failure look like a completed agent run, so check both.
+  if (obj.is_error === true) {
+    const reason = typeof obj.terminal_reason === "string" ? obj.terminal_reason : "is_error";
+    return {
+      ok: false,
+      text,
+      costUsd: cost,
+      raw: parsed,
+      error: `claude run reported is_error (${reason}): ${text || "no message"}`,
+    };
+  }
+
   if (subtype !== "success") {
     return { ok: false, text, costUsd: cost, raw: parsed, error: `claude run ended with subtype ${subtype}` };
   }
