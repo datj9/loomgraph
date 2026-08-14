@@ -1,0 +1,47 @@
+{
+  "name": "loomgraph",
+  "version": "0.1.0",
+  "description": "Compose Claude Code, Codex, and OpenCode runs into a checkpointed graph - resumable, budgeted, auditable.",
+  "type": "module",
+  "bin": {
+    "lg": "./dist/cli.js"
+  },
+  "main": "./dist/index.js",
+  "files": [
+    "dist",
+    "examples",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "agent",
+    "graph",
+    "checkpoint",
+    "cli",
+    "orchestration"
+  ],
+  "author": "Dat Nguyen",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "dev": "tsx src/cli.ts"
+  },
+  "dependencies": {
+    "commander": "^15.0.0",
+    "execa": "^10.0.1",
+    "yaml": "^2.9.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "tsup": "^8.5.1",
+    "tsx": "^4.23.12",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  }
+}
