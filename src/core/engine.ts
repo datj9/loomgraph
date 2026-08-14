@@ -1,0 +1,275 @@
+import { isAbsolute, resolve } from "node:path";
+import type { Adapter, AdapterOutput } from "../adapters/types.js";
+import type { AdapterRegistry } from "../adapters/registry.js";
+import { checkBudget, recordSpend } from "./budget.js";
+import { END, type Edge, type Graph, type NodeDef } from "./graph.js";
+import { EventLog, type LgEvent, type LgEventInput } from "./events.js";
+import { CheckpointStore } from "./store.js";
+import type { NodeResult, RunState } from "./types.js";
+
+export class EngineError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "EngineError";
+  }
+}
+
+export interface EngineDeps {
+  store: CheckpointStore;
+  log: EventLog;
+  registry: AdapterRegistry;
+  /** Injected in tests so retry backoff does not cost wall-clock time. */
+  sleep?: (ms: number) => Promise<void>;
+  /** Answers for human nodes, keyed by node id. Supplied by `lg resume --answer`. */
+  humanAnswers?: Record<string, string>;
+  onEvent?: (event: LgEvent) => void;
+}
+
+export function makeRunId(graphName: string, now = new Date(), rand = Math.random()): string {
+  const stamp = now.toISOString().replace(/[-:]/g, "").replace(/\..+$/, "").replace("T", "-");
+  const suffix = rand.toString(36).slice(2, 6).padEnd(4, "0");
+  return `${graphName}-${stamp}-${suffix}`;
+}
+
+export function newRunState(
+  graph: Graph,
+  opts: { runId: string; cwd: string; vars?: Record<string, unknown> },
+): RunState {
+  const now = new Date().toISOString();
+  return {
+    runId: opts.runId,
+    graphName: graph.name,
+    status: "pending",
+    createdAt: now,
+    updatedAt: now,
+    cwd: opts.cwd,
+    vars: { ...graph.vars, ...(opts.vars ?? {}) },
+    budget: { ...graph.budget },
+    spent: { usd: 0, wallClockSec: 0, nodeRuns: 0 },
+    nodes: {},
+    completed: [],
+    seq: 0,
+  };
+}
+
+/** Resolve `{{vars.x}}`, `{{x}}` and `{{nodes.<id>.output}}` against the run state. */
+export function interpolate(template: string, state: RunState): string {
+  return template.replace(/\{\{\s*([A-Za-z0-9_.]+)\s*\}\}/g, (_match, ref: string) => {
+    const parts = ref.split(".");
+    let value: unknown;
+
+    if (parts.length === 1) {
+      value = state.vars[parts[0]!];
+    } else if (parts[0] === "vars" && parts.length === 2) {
+      value = state.vars[parts[1]!];
+    } else if (parts[0] === "nodes" && parts.length === 3 && parts[2] === "output") {
+      value = state.nodes[parts[1]!]?.output;
+    } else {
+      throw new EngineError(`unknown template reference "{{${ref}}}"`);
+    }
+
+    if (value === undefined) throw new EngineError(`unknown template reference "{{${ref}}}"`);
+    return typeof value === "string" ? value : JSON.stringify(value);
+  });
+}
+
+function predicateHolds(edge: Edge, state: RunState): boolean {
+  if (!edge.from.every((id) => state.completed.includes(id))) return false;
+  switch (edge.when) {
+    case "all_succeeded":
+      return edge.from.every((id) => state.nodes[id]?.status === "succeeded");
+    case "any_succeeded":
+      return edge.from.some((id) => state.nodes[id]?.status === "succeeded");
+    default:
+      return true;
+  }
+}
+
+function incomingEdges(graph: Graph): Map<string, Edge[]> {
+  const incoming = new Map<string, Edge[]>();
+  for (const id of Object.keys(graph.nodes)) incoming.set(id, []);
+  for (const edge of graph.edges) {
+    for (const to of edge.to) {
+      if (to === END) continue;
+      incoming.get(to)!.push(edge);
+    }
+  }
+  return incoming;
+}
+
+/** Nodes whose every incoming edge is satisfied and that have not completed yet. */
+export function readySet(graph: Graph, state: RunState): string[] {
+  const incoming = incomingEdges(graph);
+  return Object.keys(graph.nodes).filter((id) => {
+    if (state.completed.includes(id)) return false;
+    return incoming.get(id)!.every((edge) => predicateHolds(edge, state));
+  });
+}
+
+export function endReached(graph: Graph, state: RunState): boolean {
+  return graph.edges.some((edge) => edge.to.includes(END) && predicateHolds(edge, state));
+}
+
+function nodeCwd(def: NodeDef, state: RunState): string {
+  if (!def.cwd) return state.cwd;
+  return isAbsolute(def.cwd) ? def.cwd : resolve(state.cwd, def.cwd);
+}
+
+function pickAdapter(def: NodeDef, registry: AdapterRegistry): Adapter {
+  const name = def.type === "command" ? "command" : def.type === "human" ? "human" : def.adapter;
+  const adapter = registry[name];
+  if (!adapter) {
+    throw new EngineError(`no adapter "${name}" available - registered adapters: ${Object.keys(registry).join(", ")}`);
+  }
+  return adapter;
+}
+
+export async function execute(graph: Graph, initial: RunState, deps: EngineDeps): Promise<RunState> {
+  const { store, log, registry } = deps;
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const answers = deps.humanAnswers ?? {};
+
+  let state = initial;
+  if (state.status === "succeeded" || state.status === "failed") {
+    throw new EngineError(`run ${state.runId} is already ${state.status} and cannot be executed again`);
+  }
+
+  const emit = (input: LgEventInput): void => {
+    const event = log.append(state.runId, input);
+    deps.onEvent?.(event);
+  };
+
+  const resumed = state.completed.length > 0 || state.status === "paused";
+  state.status = "running";
+  state = store.save(state);
+  emit({ kind: "run_started", data: { graph: graph.name, resumed, cwd: state.cwd } });
+
+  const finish = (status: "succeeded" | "failed", error: string | null): RunState => {
+    state.status = status;
+    state = store.save(state);
+    emit({ kind: "run_finished", data: { status, error, spent: state.spent } });
+    return state;
+  };
+
+  /** Run one node to completion, honouring its retry policy. */
+  const executeNode = async (id: string, def: NodeDef): Promise<NodeResult> => {
+    const startedAt = new Date().toISOString();
+    const maxAttempts = def.retries + 1;
+    let attempts = 0;
+    let costUsd = 0;
+    let lastError = "node did not run";
+    let lastText = "";
+
+    while (attempts < maxAttempts) {
+      attempts += 1;
+      emit({ kind: "node_started", nodeId: id, data: { attempt: attempts, type: def.type } });
+
+      const out = await runOnce(id, def);
+      costUsd += out.costUsd;
+      lastText = out.text;
+
+      if (out.ok) {
+        return { nodeId: id, status: "succeeded", startedAt, endedAt: new Date().toISOString(), attempts, output: out.text, error: null, costUsd };
+      }
+      lastError = out.error ?? "node failed without an error message";
+      if (attempts < maxAttempts) await sleep(Math.min(2 ** attempts, 30) * 1000);
+    }
+
+    return { nodeId: id, status: "failed", startedAt, endedAt: new Date().toISOString(), attempts, output: lastText, error: lastError, costUsd };
+  };
+
+  const runOnce = async (id: string, def: NodeDef): Promise<AdapterOutput> => {
+    const adapter = pickAdapter(def, registry);
+    const cwd = nodeCwd(def, state);
+
+    if (def.type === "command") {
+      return adapter.run({ prompt: interpolate(def.run, state), cwd, timeoutSec: def.timeoutSec });
+    }
+    if (def.type === "human") {
+      throw new EngineError(`human node "${id}" cannot be dispatched to an adapter`);
+    }
+
+    const out = await adapter.run({
+      prompt: interpolate(def.prompt, state),
+      cwd,
+      maxTurns: def.maxTurns,
+      timeoutSec: def.timeoutSec,
+    });
+
+    if (def.type === "verifier" && out.ok && !out.text.includes(def.pass)) {
+      return { ...out, ok: false, error: `verifier "${id}" did not report the pass string "${def.pass}"` };
+    }
+    return out;
+  };
+
+  /** Fold a finished node into the state, then checkpoint. */
+  const commit = (result: NodeResult): void => {
+    state.nodes[result.nodeId] = result;
+    state = recordSpend(state, { usd: result.costUsd, nodeRuns: result.attempts });
+    emit({ kind: "node_finished", nodeId: result.nodeId, data: { status: result.status, attempts: result.attempts, costUsd: result.costUsd, error: result.error } });
+
+    if (result.status === "succeeded") {
+      state.completed = [...state.completed, result.nodeId];
+      for (const edge of graph.edges) {
+        if (edge.from.includes(result.nodeId)) {
+          emit({ kind: "edge_crossed", nodeId: result.nodeId, data: { from: edge.from, to: edge.to, when: edge.when } });
+        }
+      }
+    }
+    // Checkpoint after every edge crossing, never only at the end.
+    state = store.save(state);
+  };
+
+  while (true) {
+    if (endReached(graph, state)) return finish("succeeded", null);
+
+    const ready = readySet(graph, state);
+    if (ready.length === 0) {
+      return finish("failed", `deadlock: no node is ready and ${END} was never reached`);
+    }
+
+    const check = checkBudget(state);
+    if (!check.ok) {
+      emit({ kind: "budget_exceeded", data: { reason: check.reason, spent: state.spent, budget: state.budget } });
+      return finish("failed", check.reason);
+    }
+    emit({ kind: "budget_checked", data: { spent: state.spent, budget: state.budget, ready } });
+
+    const humans = ready.filter((id) => graph.nodes[id]!.type === "human");
+    const unanswered = humans.filter((id) => answers[id] === undefined);
+    if (unanswered.length > 0) {
+      for (const id of unanswered) {
+        const def = graph.nodes[id]!;
+        emit({ kind: "human_requested", nodeId: id, data: { question: def.type === "human" ? def.question : "" } });
+      }
+      state.status = "paused";
+      state = store.save(state);
+      return state;
+    }
+
+    for (const id of humans) {
+      const answer = answers[id]!;
+      const now = new Date().toISOString();
+      emit({ kind: "human_resolved", nodeId: id, data: { answer } });
+      commit({ nodeId: id, status: "succeeded", startedAt: now, endedAt: now, attempts: 1, output: answer, error: null, costUsd: 0 });
+    }
+
+    const batch = ready.filter((id) => graph.nodes[id]!.type !== "human");
+    if (batch.length > 0) {
+      // Fan-out: the whole ready set runs concurrently, checkpointing as each lands.
+      const results = await Promise.all(
+        batch.map(async (id) => {
+          const result = await executeNode(id, graph.nodes[id]!);
+          commit(result);
+          return result;
+        }),
+      );
+
+      const failed = results.filter((r) => r.status === "failed");
+      if (failed.length > 0) {
+        const detail = failed.map((r) => `${r.nodeId}: ${r.error}`).join("; ");
+        return finish("failed", `node failed after ${failed[0]!.attempts} attempt(s) - ${detail}`);
+      }
+    }
+  }
+}
