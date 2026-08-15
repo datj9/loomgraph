@@ -15,9 +15,25 @@ describe("buildCodexArgs", () => {
       "review the diff",
       "--json",
       "--skip-git-repo-check",
+      "--sandbox",
+      "read-only",
       "-C",
       "/repo",
     ]);
+  });
+
+  it("swaps in the bypass flag when the sandbox cannot start", () => {
+    // Some containers cannot run codex's bwrap sandbox at all - it fails with
+    // "bwrap: loopback: Failed RTM_NEWADDR". The escape hatch replaces
+    // --sandbox entirely rather than adding to it.
+    const args = buildCodexArgs("review the diff", "/repo", "bypass");
+    expect(args).toContain("--dangerously-bypass-approvals-and-sandbox");
+    expect(args).not.toContain("--sandbox");
+    expect(args).not.toContain("read-only");
+  });
+
+  it("keeps read-only as the default policy", () => {
+    expect(buildCodexArgs("x", "/repo")).toEqual(buildCodexArgs("x", "/repo", "read-only"));
   });
 });
 

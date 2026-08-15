@@ -4,13 +4,35 @@ import type { Adapter, AdapterInput, AdapterOutput } from "./types.js";
 /**
  * Verified against codex-cli 0.145.0:
  *
- *   codex exec <prompt> --json --skip-git-repo-check -C <cwd>
+ *   codex exec <prompt> --json --skip-git-repo-check --sandbox read-only -C <cwd>
  *
  * `--json` emits a stream of JSONL events, not a single object, so the parser
  * walks every line and keeps the last agent message it can recognise.
+ *
+ * `--sandbox read-only` matters: without an explicit sandbox policy codex can
+ * block on an approval prompt it cannot show in a non-interactive run. A
+ * verifier node only ever needs to read the tree, so read-only is both the safe
+ * and the correct policy here.
+ *
+ * The caller must also close stdin - codex prints "Reading additional input
+ * from stdin..." and waits forever when stdin stays open, which looks exactly
+ * like a hung model call.
  */
-export function buildCodexArgs(prompt: string, cwd: string): string[] {
-  return ["exec", prompt, "--json", "--skip-git-repo-check", "-C", cwd];
+/**
+ * How codex should sandbox the commands it runs.
+ *
+ * `read-only` is the default and the right policy for a verifier node. Use
+ * `bypass` only where the host is already isolated - some containers cannot
+ * start codex's bwrap sandbox at all and fail with
+ * "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted", which makes
+ * every repository read fail and the review useless.
+ */
+export type CodexSandbox = "read-only" | "workspace-write" | "bypass";
+
+export function buildCodexArgs(prompt: string, cwd: string, sandbox: CodexSandbox = "read-only"): string[] {
+  const policy =
+    sandbox === "bypass" ? ["--dangerously-bypass-approvals-and-sandbox"] : ["--sandbox", sandbox];
+  return ["exec", prompt, "--json", "--skip-git-repo-check", ...policy, "-C", cwd];
 }
 
 /** Pull agent message text out of the several event shapes codex has shipped. */
@@ -100,13 +122,19 @@ export function decideCodexResult(parsed: AdapterOutput, exitCode: number | unde
 export class CodexAdapter implements Adapter {
   readonly name = "codex";
 
-  constructor(private readonly bin = "codex") {}
+  constructor(
+    private readonly bin = "codex",
+    private readonly sandbox: CodexSandbox = (process.env.LOOMGRAPH_CODEX_SANDBOX as CodexSandbox) ?? "read-only",
+  ) {}
 
   async run(input: AdapterInput): Promise<AdapterOutput> {
-    const result = await execa(this.bin, buildCodexArgs(input.prompt, input.cwd), {
+    const result = await execa(this.bin, buildCodexArgs(input.prompt, input.cwd, this.sandbox), {
       cwd: input.cwd,
       timeout: input.timeoutSec * 1000,
       reject: false,
+      // Codex waits on stdin when it stays open, which stalls the node until the
+      // timeout fires. Close it so the run is genuinely non-interactive.
+      input: "",
     });
 
     const stdout = typeof result.stdout === "string" ? result.stdout : "";

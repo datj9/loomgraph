@@ -33,6 +33,8 @@ export class OpenCodeAdapter implements Adapter {
       cwd: input.cwd,
       timeout: input.timeoutSec * 1000,
       reject: false,
+      // Keep the run non-interactive - an open stdin can stall the CLI.
+      input: "",
     });
 
     const stdout = typeof result.stdout === "string" ? result.stdout : "";
