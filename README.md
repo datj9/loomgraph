@@ -171,6 +171,12 @@ lg resume <runId> --answer approve="ship it"
 
 Every node accepts `retries` (default 0), `timeoutSec` (default 900), and `cwd`.
 
+A `command` node also accepts two optional assertions, because a shell command that exits 0
+having done nothing is not a passing check: `expectNonEmpty: true` fails the node when the
+command wrote no output, and `expect: "<literal>"` fails it when that substring is absent
+from stdout. `npm run lint --if-present` in a repo with no lint script is the case these
+exist for.
+
 ## Budgets
 
 Three ceilings, all enforced *before* each dispatch batch, all recorded in the checkpoint:
@@ -200,7 +206,7 @@ Event kinds: `run_started`, `node_started`, `node_finished`, `edge_crossed`, `bu
 
 | Adapter | Command it runs | Status |
 | --- | --- | --- |
-| `claude` | `claude -p <prompt> --output-format json --permission-mode acceptEdits --max-turns <n>` | Tested against Claude Code 2.1.232 |
+| `claude` | `claude -p <prompt> --output-format json --permission-mode acceptEdits --max-turns <n>` | Tested against Claude Code 2.1.232 and the array-form json output of 3.x |
 | `codex` | `codex exec <prompt> --json --skip-git-repo-check --sandbox read-only -C <cwd>` | Tested against codex-cli 0.145.0 |
 | `opencode` | `opencode run <prompt>` | **Experimental — never executed against a real binary.** The parser is unit-tested; the invocation is not. |
 
