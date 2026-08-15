@@ -2,6 +2,7 @@
 import { Command } from "commander";
 import { VERSION } from "./index.js";
 import { eventsCommand } from "./commands/events.js";
+import { reportCommand } from "./commands/report.js";
 import { resumeCommand } from "./commands/resume.js";
 import { runCommand } from "./commands/run.js";
 import { lsCommand, statusCommand } from "./commands/status.js";
@@ -67,5 +68,15 @@ program
   .option("--kind <kind>", "only print events of this kind")
   .description("print the jsonl audit trail for a run")
   .action((runId: string, options) => finish(eventsCommand(runId, options)));
+
+program
+  .command("report")
+  .argument("<runId>")
+  .option("--out <path>", "write the html here instead of the run directory")
+  .option("--publish", "publish the report with the enclave cli")
+  .option("--title <title>", "title for the published artifact")
+  .option("--visibility <visibility>", "private or org", "private")
+  .description("render a run to a self-contained html report")
+  .action((runId: string, opts) => finish(reportCommand(runId, opts)));
 
 program.parse();
