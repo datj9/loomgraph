@@ -201,10 +201,25 @@ Event kinds: `run_started`, `node_started`, `node_finished`, `edge_crossed`, `bu
 | Adapter | Command it runs | Status |
 | --- | --- | --- |
 | `claude` | `claude -p <prompt> --output-format json --permission-mode acceptEdits --max-turns <n>` | Tested against Claude Code 2.1.232 |
-| `codex` | `codex exec <prompt> --json --skip-git-repo-check -C <cwd>` | Tested against codex-cli 0.145.0 |
+| `codex` | `codex exec <prompt> --json --skip-git-repo-check --sandbox read-only -C <cwd>` | Tested against codex-cli 0.145.0 |
 | `opencode` | `opencode run <prompt>` | **Experimental — never executed against a real binary.** The parser is unit-tested; the invocation is not. |
 
 Cost reporting differs by CLI: Claude Code reports `total_cost_usd`; Codex and OpenCode report nothing, and loomgraph records `0` rather than estimating from a price table. Wall-clock and node-run ceilings still apply to them.
+
+### Environment
+
+| Variable | Effect |
+| --- | --- |
+| `CLAUDE_CONFIG_DIR` | Which Claude Code credential directory to use. Set it when your default `~/.claude` session is expired or you keep several logins side by side. |
+| `LOOMGRAPH_CODEX_SANDBOX` | Codex sandbox policy: `read-only` (default), `workspace-write`, or `bypass`. |
+
+### Two failure modes worth knowing
+
+**An expired login does not look like an error.** Claude Code returns `subtype: "success"` *and* `is_error: true` when its OAuth session has lapsed, with the authentication message sitting in the `result` field. An adapter that trusts `subtype` alone records a node that spent nothing, changed nothing, and reported success. loomgraph checks both fields and fails the node with the message the CLI actually returned.
+
+**A verifier that cannot read the tree must fail, not pass.** Codex sandboxes the commands it runs, and some containers cannot start that sandbox at all — every read fails with `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`. A review under those conditions is worthless, so the verifier node fails and says why. Set `LOOMGRAPH_CODEX_SANDBOX=bypass` only when the host is already isolated.
+
+Both agent adapters close stdin before spawning. Codex otherwise prints `Reading additional input from stdin...` and waits until the node's timeout fires, which is indistinguishable from a slow model.
 
 ## Commands
 
