@@ -233,6 +233,38 @@ edges:
     expect(() => parseGraph(src)).toThrow(/run/);
   });
 
+  it("accepts a command node with expect and expectNonEmpty", () => {
+    const src = graph(`nodes:
+  a:
+    type: command
+    run: "npm test"
+    expect: "0 failed"
+    expectNonEmpty: true
+edges:
+  - from: a
+    to: END
+`);
+    expect(parseGraph(src).nodes.a).toMatchObject({
+      type: "command",
+      run: "npm test",
+      expect: "0 failed",
+      expectNonEmpty: true,
+    });
+  });
+
+  it("rejects a command node whose expect is an empty string", () => {
+    const src = graph(`nodes:
+  a:
+    type: command
+    run: "npm test"
+    expect: ""
+edges:
+  - from: a
+    to: END
+`);
+    expect(() => parseGraph(src)).toThrow(/node "a"/);
+  });
+
   it("rejects a human node without a question", () => {
     const src = graph(`nodes:
   a:

@@ -6,6 +6,7 @@ import { parseGraph } from "./graph.js";
 import { CheckpointStore } from "./store.js";
 import { EventLog } from "./events.js";
 import { execute, newRunState, interpolate, readySet, EngineError } from "./engine.js";
+import * as engine from "./engine.js";
 import type { EngineDeps } from "./engine.js";
 import type { Adapter, AdapterInput, AdapterOutput } from "../adapters/types.js";
 import type { RunState } from "./types.js";
@@ -94,6 +95,35 @@ describe("readySet", () => {
     state.completed = ["a"];
     state.nodes.a = { nodeId: "a", status: "succeeded", startedAt: "", endedAt: null, attempts: 1, output: "", error: null, costUsd: 0 };
     expect(readySet(graph, state).sort()).toEqual(["b", "c"]);
+  });
+});
+
+describe("checkCommandExpectations", () => {
+  const check = (engine as unknown as {
+    checkCommandExpectations: (
+      node: { expect?: string; expectNonEmpty?: boolean },
+      text: string,
+    ) => string | null;
+  }).checkCommandExpectations;
+
+  it("returns null when no expectations are declared", () => {
+    expect(check({}, "anything")).toBeNull();
+  });
+
+  it("fails when expectNonEmpty is set and the output is blank", () => {
+    expect(check({ expectNonEmpty: true }, "  \n ")).toBe("command produced no output but expectNonEmpty is set");
+  });
+
+  it("fails when the expect substring is absent", () => {
+    expect(check({ expect: "PASS" }, "FAILED")).toBe("command output did not contain the expected string: PASS");
+  });
+
+  it("passes when the expect substring is present", () => {
+    expect(check({ expect: "PASS" }, "the result is PASS today")).toBeNull();
+  });
+
+  it("prefers the blank-output message when both expectations fail", () => {
+    expect(check({ expect: "PASS", expectNonEmpty: true }, "")).toBe("command produced no output but expectNonEmpty is set");
   });
 });
 
@@ -328,6 +358,24 @@ edges:
     const final = await execute(parseGraph(src), start(src, "fail-run"), deps(failing));
     expect(final.status).toBe("failed");
     expect(final.nodes.v!.error).toMatch(/PASS/);
+  });
+
+  it("fails a command node whose output does not meet its expectations", async () => {
+    const src = `
+name: expect
+budget: { maxUsd: 10, maxWallClockSec: 600, maxNodeRuns: 20 }
+nodes:
+  a: { type: command, run: "npm run lint --if-present", expectNonEmpty: true }
+edges:
+  - { from: a, to: END }
+`;
+    const registry = { command: stub("command", () => ok("")) };
+
+    const final = await execute(parseGraph(src), start(src), deps(registry));
+
+    expect(final.status).toBe("failed");
+    expect(final.nodes.a!.status).toBe("failed");
+    expect(final.nodes.a!.error).toBe("command produced no output but expectNonEmpty is set");
   });
 
   it("interpolates vars and upstream node output into an agent prompt", async () => {

@@ -107,6 +107,24 @@ export function readySet(graph: Graph, state: RunState): string[] {
 }
 
 /**
+ * Assert a command node's opt-in expectations against its stdout. Returns null
+ * when the node satisfies them, otherwise the failure message. A shell command
+ * that exits 0 having done nothing is not a passing check.
+ */
+export function checkCommandExpectations(
+  node: { expect?: string; expectNonEmpty?: boolean },
+  text: string,
+): string | null {
+  if (node.expectNonEmpty === true && text.trim() === "") {
+    return "command produced no output but expectNonEmpty is set";
+  }
+  if (typeof node.expect === "string" && node.expect !== "" && text.includes(node.expect) === false) {
+    return `command output did not contain the expected string: ${node.expect}`;
+  }
+  return null;
+}
+
+/**
  * The batches the scheduler would dispatch, in order. Pure - used by
  * `lg run --dry-run`, which must not spawn anything.
  */
@@ -205,7 +223,14 @@ export async function execute(graph: Graph, initial: RunState, deps: EngineDeps)
     const cwd = nodeCwd(def, state);
 
     if (def.type === "command") {
-      return adapter.run({ prompt: interpolate(def.run, state), cwd, timeoutSec: def.timeoutSec });
+      const out = await adapter.run({ prompt: interpolate(def.run, state), cwd, timeoutSec: def.timeoutSec });
+      if (out.ok) {
+        const expectationError = checkCommandExpectations(def, out.text);
+        if (expectationError !== null) {
+          return { ...out, ok: false, error: expectationError };
+        }
+      }
+      return out;
     }
     if (def.type === "human") {
       throw new EngineError(`human node "${id}" cannot be dispatched to an adapter`);

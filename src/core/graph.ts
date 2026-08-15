@@ -50,6 +50,8 @@ const verifierNode = z.object({
 const commandNode = z.object({
   type: z.literal("command"),
   run: z.string().min(1),
+  expect: z.string().min(1).optional(),
+  expectNonEmpty: z.boolean().optional(),
   ...common,
 });
 
