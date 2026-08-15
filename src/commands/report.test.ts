@@ -72,7 +72,7 @@ describe("renderReportHtml", () => {
     const out = renderReportHtml(makeState(), noEvents);
     expect(out).toContain("0.2500/2.0000 usd · 60s/1800s wall clock · 2/20 node runs");
     expect(out).toContain(
-      "note: adapters that do not report a price (codex, opencode, command) record 0.0000 usd - the number is not estimated.",
+      "note: adapters that do not report a price (codex, command) record 0.0000 usd - the number is not estimated.",
     );
   });
 
@@ -85,7 +85,7 @@ describe("renderReportHtml", () => {
     const out = renderReportHtml(makeState({ nodes: {}, completed: [], status: "pending" }), noEvents);
     expect(out.startsWith("<!doctype html>")).toBe(true);
     expect(out).toContain(
-      "note: adapters that do not report a price (codex, opencode, command) record 0.0000 usd - the number is not estimated.",
+      "note: adapters that do not report a price (codex, command) record 0.0000 usd - the number is not estimated.",
     );
   });
 

@@ -4,7 +4,7 @@ import type { Graph } from "../core/graph.js";
 import type { RunState } from "../core/types.js";
 
 const COST_NOTE =
-  "note: adapters that do not report a price (codex, opencode, command) record 0.0000 usd - the number is not estimated.";
+  "note: adapters that do not report a price (codex, command) record 0.0000 usd - the number is not estimated.";
 
 function pad(value: string, width: number): string {
   return value.length >= width ? value : value + " ".repeat(width - value.length);
