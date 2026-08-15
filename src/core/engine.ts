@@ -54,7 +54,7 @@ export function newRunState(
 
 /** Resolve `{{vars.x}}`, `{{x}}` and `{{nodes.<id>.output}}` against the run state. */
 export function interpolate(template: string, state: RunState): string {
-  return template.replace(/\{\{\s*([A-Za-z0-9_.]+)\s*\}\}/g, (_match, ref: string) => {
+  return template.replace(/\{\{\s*([A-Za-z0-9_.\-]+)\s*\}\}/g, (_match, ref: string) => {
     const parts = ref.split(".");
     let value: unknown;
 

@@ -55,6 +55,15 @@ edges:
   - { from: c, to: END }
 `;
 
+const HYPHEN = `
+name: hyphen
+budget: { maxUsd: 10, maxWallClockSec: 600, maxNodeRuns: 20 }
+nodes:
+  my-node: { type: command, run: "echo HI" }
+edges:
+  - { from: my-node, to: END }
+`;
+
 const FANOUT = `
 name: fanout
 budget: { maxUsd: 10, maxWallClockSec: 600, maxNodeRuns: 20 }
@@ -83,6 +92,39 @@ describe("interpolate", () => {
 
   it("throws naming an unresolvable reference", () => {
     expect(() => interpolate("{{vars.nope}}", start(LINEAR))).toThrow(/nope/);
+  });
+
+  it("resolves a node output whose id contains a hyphen", () => {
+    const state = start(HYPHEN);
+    state.nodes["my-node"] = {
+      nodeId: "my-node", status: "succeeded", startedAt: "", endedAt: null,
+      attempts: 1, output: "HI", error: null, costUsd: 0,
+    };
+    expect(interpolate("[{{nodes.my-node.output}}]", state)).toBe("[HI]");
+  });
+
+  it("throws naming an unresolvable hyphenated reference", () => {
+    expect(() => interpolate("{{nodes.no-such.output}}", start(LINEAR))).toThrow(
+      new EngineError('unknown template reference "{{nodes.no-such.output}}"'),
+    );
+  });
+
+  it("honours whitespace padding around a hyphenated reference", () => {
+    const state = start(HYPHEN);
+    state.nodes["my-node"] = {
+      nodeId: "my-node", status: "succeeded", startedAt: "", endedAt: null,
+      attempts: 1, output: "HI", error: null, costUsd: 0,
+    };
+    expect(interpolate("{{ nodes.my-node.output }}", state)).toBe("HI");
+  });
+
+  it("leaves hyphens in surrounding literal text untouched", () => {
+    const state = start(HYPHEN);
+    state.nodes["my-node"] = {
+      nodeId: "my-node", status: "succeeded", startedAt: "", endedAt: null,
+      attempts: 1, output: "HI", error: null, costUsd: 0,
+    };
+    expect(interpolate("a-b {{nodes.my-node.output}} c-d", state)).toBe("a-b HI c-d");
   });
 });
 
