@@ -213,9 +213,24 @@ Event kinds: `run_started`, `node_started`, `node_finished`, `edge_crossed`, `bu
 | --- | --- | --- |
 | `claude` | `claude -p <prompt> --output-format json --permission-mode acceptEdits --max-turns <n>` | Tested against Claude Code 2.1.232 and the array-form json output of 3.x |
 | `codex` | `codex exec <prompt> --json --skip-git-repo-check --sandbox read-only -C <cwd>` | Tested against codex-cli 0.145.0 |
-| `opencode` | `opencode run <prompt>` | **Experimental — never executed against a real binary.** The parser is unit-tested; the invocation is not. |
+| `opencode` | `opencode run --format json [-m <model>] <prompt>` | Tested against opencode 1.18.17 |
 
-Cost reporting differs by CLI: Claude Code reports `total_cost_usd`; Codex and OpenCode report nothing, and loomgraph records `0` rather than estimating from a price table. Wall-clock and node-run ceilings still apply to them.
+Cost reporting differs by CLI: Claude Code reports `total_cost_usd`, and OpenCode reports a price per step under `--format json` — which is the only reason this adapter uses that format, since the default one prints prose and no price at all. Codex reports nothing, and loomgraph records `0` for it rather than estimating from a price table. Wall-clock and node-run ceilings still apply either way.
+
+### Choosing a model
+
+An `agent` or `verifier` node may name the model it wants, passed straight through to the CLI:
+
+```yaml
+review:
+  type: verifier
+  adapter: opencode
+  model: "opencode-go/deepseek-v4-flash"
+  prompt: "Review the diff. Reply PASS or FAIL."
+  pass: "PASS"
+```
+
+Omit it and the CLI's own resolution decides, which is not always what the config says: with no `-m`, opencode ignored a configured `model` and fell through to a provider with no credentials. `OPENCODE_MODEL` is ignored — the flag is the only way. A `command` or `human` node that declares a model is a validation error rather than a silently ignored key.
 
 ### Environment
 
