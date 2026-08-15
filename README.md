@@ -179,13 +179,18 @@ exist for.
 
 ## Budgets
 
-Three ceilings, all enforced *before* each dispatch batch, all recorded in the checkpoint:
+Three ceilings, all enforced *before* each dispatch batch **and once more before a run is
+allowed to finish successfully**, all recorded in the checkpoint:
 
 - `maxUsd` — summed from what the adapters actually report.
 - `maxWallClockSec` — measured from the run's creation, so it survives a resume.
 - `maxNodeRuns` — counts every attempt, retries included.
 
 Hitting a ceiling stops the run with status `failed`, a `budget_exceeded` event naming the ceiling, and exit code 3. Nothing further is dispatched.
+
+A ceiling breached by the final batch fails the run too. A node that already finished keeps
+its result — the run fails, the work does not unwind — so `lg status` still shows what was
+done and exactly how far over the line it went.
 
 Cost numbers are never invented. Claude Code reports `total_cost_usd` and that number is used as-is; adapters that report no price record exactly `0.0000`, and `lg status` says so.
 
