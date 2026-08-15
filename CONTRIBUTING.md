@@ -12,7 +12,7 @@ npm run typecheck && npm test && npm run build
 node dist/cli.js run examples/hello.yaml
 ```
 
-Node >= 20 is required.
+Node >= 22 is required (`execa` v10 uses `Set.prototype.union`, which lands in Node 22).
 
 ## Working on a change
 
