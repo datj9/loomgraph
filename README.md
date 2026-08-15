@@ -236,6 +236,7 @@ Both agent adapters close stdin before spawning. Codex otherwise prints `Reading
 | `lg status <runId>` | Per-node table plus the budget line |
 | `lg ls` | Every run with status and cost |
 | `lg validate <graph.yaml>` | Exit 0 if valid, else exit 1 with the specific error |
+| `lg report <runId> [--out path] [--publish] [--title t] [--visibility private\|org]` | Render the run to a self-contained html file; `--publish` hosts it with the `enclave` cli |
 | `lg events <runId> [--kind K]` | The JSONL audit trail, filterable |
 
 Exit codes: `0` success, `1` validation or usage error, `2` run failed, `3` budget exceeded, `4` paused awaiting a human.
@@ -245,6 +246,10 @@ Exit codes: `0` success, `1` validation or usage error, `2` run failed, `3` budg
 - **Not a model, and not an SDK for one.** loomgraph makes zero API calls of its own and has no LLM SDK dependency.
 - **Not a replacement for your agent CLI.** It shells out to the CLI you already installed and authenticated.
 - **Not a workflow server.** No daemon, no web UI, no cloud, no plugin system in v0.1.
+
+`lg report --publish` does not change that: it writes a static file and shells out to the
+`enclave` cli the same way a node shells out to `claude`. If `enclave` is not installed the
+report is still written, and nothing is uploaded.
 
 Concurrency caveat: fan-out nodes in v0.1 share one working directory. If two branches edit the same files, they will collide. Per-node git worktrees are phase 2.
 
