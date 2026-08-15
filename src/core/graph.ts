@@ -35,6 +35,7 @@ const agentNode = z.object({
   adapter: z.enum(ADAPTER_NAMES),
   prompt: z.string().min(1),
   maxTurns: z.number().int().positive().default(20),
+  model: z.string().min(1).optional(),
   ...common,
 });
 
@@ -44,6 +45,7 @@ const verifierNode = z.object({
   prompt: z.string().min(1),
   pass: z.string().min(1),
   maxTurns: z.number().int().positive().default(20),
+  model: z.string().min(1).optional(),
   ...common,
 });
 
@@ -150,6 +152,12 @@ export function parseGraph(source: string, sourceName = "graph"): Graph {
     const type = (value as Record<string, unknown>).type;
     if (typeof type !== "string" || !(NODE_TYPES as readonly string[]).includes(type)) {
       fail(`node "${id}" has unknown type "${String(type)}" - valid types are ${NODE_TYPES.join(", ")}`);
+    }
+    // zod strips unknown keys, so a `model` on a command or human node would
+    // vanish silently rather than fail. Only the two node types that dispatch a
+    // prompt to an agent CLI can carry one.
+    if ((value as Record<string, unknown>).model !== undefined && type !== "agent" && type !== "verifier") {
+      fail(`node "${id}" of type "${type}" cannot declare a model - only agent and verifier nodes dispatch to an adapter`);
     }
     const parsed = nodeSchema.safeParse(value);
     if (!parsed.success) fail(issuesToMessage(`node "${id}"`, parsed.error));

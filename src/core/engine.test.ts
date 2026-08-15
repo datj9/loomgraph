@@ -636,3 +636,64 @@ edges:
     expect(log.read("run1").filter((e) => e.kind === "budget_exceeded")).toHaveLength(0);
   });
 });
+
+describe("model passthrough", () => {
+  const WITH_MODEL = `
+name: m
+budget:
+  maxUsd: 1
+  maxWallClockSec: 60
+  maxNodeRuns: 5
+nodes:
+  a:
+    type: agent
+    adapter: claude
+    prompt: "hi"
+    model: "claude-opus-5"
+edges:
+  - from: a
+    to: END
+`;
+
+  const WITHOUT_MODEL = `
+name: m
+budget:
+  maxUsd: 1
+  maxWallClockSec: 60
+  maxNodeRuns: 5
+nodes:
+  a:
+    type: agent
+    adapter: claude
+    prompt: "hi"
+edges:
+  - from: a
+    to: END
+`;
+
+  it("passes a node's model through to the adapter", async () => {
+    let seen: AdapterInput | null = null;
+    const registry = {
+      claude: stub("claude", (input) => {
+        seen = input;
+        return ok("done");
+      }),
+    };
+    await execute(parseGraph(WITH_MODEL), start(WITH_MODEL), deps(registry));
+    expect(seen).not.toBeNull();
+    expect(seen!.model).toBe("claude-opus-5");
+  });
+
+  it("leaves model undefined on the adapter input when the node declares none", async () => {
+    let seen: AdapterInput | null = null;
+    const registry = {
+      claude: stub("claude", (input) => {
+        seen = input;
+        return ok("done");
+      }),
+    };
+    await execute(parseGraph(WITHOUT_MODEL), start(WITHOUT_MODEL), deps(registry));
+    expect(seen).not.toBeNull();
+    expect(seen!.model).toBeUndefined();
+  });
+});

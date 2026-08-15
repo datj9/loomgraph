@@ -40,6 +40,23 @@ describe("buildClaudeArgs", () => {
       "acceptEdits",
     ]);
   });
+
+  it("appends --model when a model is given", () => {
+    expect(buildClaudeArgs("hi", undefined, "claude-opus-5")).toEqual([
+      "-p",
+      "hi",
+      "--output-format",
+      "json",
+      "--permission-mode",
+      "acceptEdits",
+      "--model",
+      "claude-opus-5",
+    ]);
+  });
+
+  it("omits --model when no model is given", () => {
+    expect(buildClaudeArgs("hi", 8)).not.toContain("--model");
+  });
 });
 
 describe("parseClaudeJson", () => {

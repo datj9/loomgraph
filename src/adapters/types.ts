@@ -2,6 +2,8 @@ export interface AdapterInput {
   prompt: string;
   cwd: string;
   maxTurns?: number;
+  /** Model id passed straight to the CLI. Undefined leaves the CLI's own resolution alone. */
+  model?: string;
   timeoutSec: number;
 }
 

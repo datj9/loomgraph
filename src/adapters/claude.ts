@@ -13,9 +13,10 @@ import type { Adapter, AdapterInput, AdapterOutput } from "./types.js";
  * `type: "result"` element carries the run result, so the parser finds that
  * element before reading `subtype` and `total_cost_usd`.
  */
-export function buildClaudeArgs(prompt: string, maxTurns?: number): string[] {
+export function buildClaudeArgs(prompt: string, maxTurns?: number, model?: string): string[] {
   const args = ["-p", prompt, "--output-format", "json", "--permission-mode", "acceptEdits"];
   if (maxTurns !== undefined) args.push("--max-turns", String(maxTurns));
+  if (model !== undefined) args.push("--model", model);
   return args;
 }
 
@@ -89,7 +90,7 @@ export class ClaudeAdapter implements Adapter {
   constructor(private readonly bin = "claude") {}
 
   async run(input: AdapterInput): Promise<AdapterOutput> {
-    const args = buildClaudeArgs(input.prompt, input.maxTurns);
+    const args = buildClaudeArgs(input.prompt, input.maxTurns, input.model);
     const result = await execa(this.bin, args, {
       cwd: input.cwd,
       timeout: input.timeoutSec * 1000,

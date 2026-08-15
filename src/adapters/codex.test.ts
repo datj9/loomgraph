@@ -35,6 +35,16 @@ describe("buildCodexArgs", () => {
   it("keeps read-only as the default policy", () => {
     expect(buildCodexArgs("x", "/repo")).toEqual(buildCodexArgs("x", "/repo", "read-only"));
   });
+
+  it("appends --model when a model is given", () => {
+    const args = buildCodexArgs("x", "/repo", "read-only", "gpt-5.6-sol");
+    expect(args).toContain("--model");
+    expect(args[args.indexOf("--model") + 1]).toBe("gpt-5.6-sol");
+  });
+
+  it("omits --model when no model is given", () => {
+    expect(buildCodexArgs("x", "/repo")).not.toContain("--model");
+  });
 });
 
 describe("parseCodexJsonl", () => {

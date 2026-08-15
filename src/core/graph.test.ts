@@ -182,6 +182,74 @@ edges:
     expect(() => parseGraph(src)).toThrow(/maxUsd/);
   });
 
+  it("accepts an agent node with an explicit model", () => {
+    const src = graph(`nodes:
+  a:
+    type: agent
+    adapter: opencode
+    prompt: "hi"
+    model: "opencode-go/deepseek-v4-flash"
+edges:
+  - from: a
+    to: END
+`);
+    const parsed = parseGraph(src);
+    const node = parsed.nodes["a"];
+    expect(node?.type).toBe("agent");
+    if (node?.type === "agent") expect(node.model).toBe("opencode-go/deepseek-v4-flash");
+  });
+
+  it("accepts a verifier node with an explicit model", () => {
+    const src = graph(`nodes:
+  a:
+    type: verifier
+    adapter: codex
+    prompt: "hi"
+    pass: "PASS"
+    model: "gpt-5.6-sol"
+edges:
+  - from: a
+    to: END
+`);
+    const node = parseGraph(src).nodes["a"];
+    if (node?.type === "verifier") expect(node.model).toBe("gpt-5.6-sol");
+    else throw new Error("expected a verifier node");
+  });
+
+  it("leaves model undefined when a node does not declare one", () => {
+    const node = parseGraph(FULL_EXAMPLE).nodes["reproduce"];
+    if (node?.type === "agent") expect(node.model).toBeUndefined();
+    else throw new Error("expected an agent node");
+  });
+
+  it("rejects an agent node whose model is an empty string", () => {
+    const src = graph(`nodes:
+  a:
+    type: agent
+    adapter: claude
+    prompt: "hi"
+    model: ""
+edges:
+  - from: a
+    to: END
+`);
+    expect(() => parseGraph(src)).toThrow(/a/);
+  });
+
+  it("rejects a command node that declares a model", () => {
+    const src = graph(`nodes:
+  a:
+    type: command
+    run: "echo hi"
+    model: "claude-opus-5"
+edges:
+  - from: a
+    to: END
+`);
+    expect(() => parseGraph(src)).toThrow(/a/);
+    expect(() => parseGraph(src)).toThrow(/model/);
+  });
+
   it("rejects an agent node with an unknown adapter", () => {
     const src = graph(`nodes:
   a:

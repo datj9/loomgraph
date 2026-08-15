@@ -240,6 +240,7 @@ export async function execute(graph: Graph, initial: RunState, deps: EngineDeps)
       prompt: interpolate(def.prompt, state),
       cwd,
       maxTurns: def.maxTurns,
+      model: def.model,
       timeoutSec: def.timeoutSec,
     });
 
