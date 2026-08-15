@@ -268,7 +268,14 @@ export async function execute(graph: Graph, initial: RunState, deps: EngineDeps)
   };
 
   while (true) {
-    if (endReached(graph, state)) return finish("succeeded", null);
+    if (endReached(graph, state)) {
+      const check = checkBudget(state);
+      if (!check.ok) {
+        emit({ kind: "budget_exceeded", data: { reason: check.reason, spent: state.spent, budget: state.budget } });
+        return finish("failed", check.reason);
+      }
+      return finish("succeeded", null);
+    }
 
     const ready = readySet(graph, state);
     if (ready.length === 0) {

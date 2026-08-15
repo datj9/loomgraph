@@ -425,4 +425,172 @@ edges:
     expect(final.status).toBe("failed");
     expect(final.nodes.c).toBeUndefined();
   });
+
+  it("fails a run whose final spend exceeds the usd ceiling", async () => {
+    const src = `
+name: overshoot
+budget: { maxUsd: 0.30, maxWallClockSec: 600, maxNodeRuns: 20 }
+nodes:
+  a: { type: command, run: "echo a" }
+  b: { type: command, run: "echo b" }
+edges:
+  - { from: a, to: b }
+  - { from: b, to: END }
+`;
+    const registry = {
+      command: stub("command", (i) => (i.prompt === "echo a" ? ok("a", 0.2726) : ok("b", 0.2645))),
+    };
+
+    const final = await execute(parseGraph(src), start(src), deps(registry));
+
+    expect(final.status).toBe("failed");
+  });
+
+  it("emits budget_exceeded naming the ceiling when the last batch overshoots", async () => {
+    const src = `
+name: overshoot-event
+budget: { maxUsd: 0.30, maxWallClockSec: 600, maxNodeRuns: 20 }
+nodes:
+  a: { type: command, run: "echo a" }
+  b: { type: command, run: "echo b" }
+edges:
+  - { from: a, to: b }
+  - { from: b, to: END }
+`;
+    const registry = {
+      command: stub("command", (i) => (i.prompt === "echo a" ? ok("a", 0.2726) : ok("b", 0.2645))),
+    };
+
+    await execute(parseGraph(src), start(src), deps(registry));
+
+    const exceeded = log.read("run1").filter((e) => e.kind === "budget_exceeded");
+    expect(exceeded).toHaveLength(1);
+    expect(String(exceeded[0]!.data.reason)).toMatch(/maxUsd/);
+  });
+
+  it("keeps every completed node result when the final budget check fails", async () => {
+    const src = `
+name: overshoot-keep
+budget: { maxUsd: 0.30, maxWallClockSec: 600, maxNodeRuns: 20 }
+nodes:
+  a: { type: command, run: "echo a" }
+  b: { type: command, run: "echo b" }
+edges:
+  - { from: a, to: b }
+  - { from: b, to: END }
+`;
+    const registry = {
+      command: stub("command", (i) => (i.prompt === "echo a" ? ok("a", 0.2726) : ok("b", 0.2645))),
+    };
+
+    const final = await execute(parseGraph(src), start(src), deps(registry));
+
+    expect(final.status).toBe("failed");
+    expect(final.nodes.a!.status).toBe("succeeded");
+    expect(final.nodes.a!.costUsd).toBe(0.2726);
+    expect(final.nodes.b!.status).toBe("succeeded");
+    expect(final.nodes.b!.costUsd).toBe(0.2645);
+  });
+
+  it("succeeds when the final spend stays under the ceiling", async () => {
+    const src = `
+name: under
+budget: { maxUsd: 0.30, maxWallClockSec: 600, maxNodeRuns: 20 }
+nodes:
+  a: { type: command, run: "echo a" }
+  b: { type: command, run: "echo b" }
+edges:
+  - { from: a, to: b }
+  - { from: b, to: END }
+`;
+    const registry = {
+      command: stub("command", (i) => (i.prompt === "echo a" ? ok("a", 0.2) : ok("b", 0.0999))),
+    };
+
+    const final = await execute(parseGraph(src), start(src), deps(registry));
+
+    expect(final.status).toBe("succeeded");
+    expect(log.read("run1").filter((e) => e.kind === "budget_exceeded")).toHaveLength(0);
+  });
+
+  it("treats a final spend exactly at the usd ceiling as a breach", async () => {
+    const src = `
+name: exactly
+budget: { maxUsd: 0.30, maxWallClockSec: 600, maxNodeRuns: 20 }
+nodes:
+  a: { type: command, run: "echo a" }
+  b: { type: command, run: "echo b" }
+edges:
+  - { from: a, to: b }
+  - { from: b, to: END }
+`;
+    const registry = {
+      command: stub("command", (i) => (i.prompt === "echo a" ? ok("a", 0.15) : ok("b", 0.15))),
+    };
+
+    const final = await execute(parseGraph(src), start(src), deps(registry));
+
+    expect(final.status).toBe("failed");
+  });
+
+  it("fails a run whose final node-run count exceeds maxNodeRuns", async () => {
+    const src = `
+name: runcap
+budget: { maxUsd: 10, maxWallClockSec: 600, maxNodeRuns: 2 }
+nodes:
+  a: { type: command, run: "echo a" }
+  b: { type: command, run: "echo b" }
+edges:
+  - { from: a, to: b }
+  - { from: b, to: END }
+`;
+    const registry = { command: stub("command", (i) => ok(i.prompt)) };
+
+    const final = await execute(parseGraph(src), start(src), deps(registry));
+
+    expect(final.status).toBe("failed");
+    const exceeded = log.read("run1").filter((e) => e.kind === "budget_exceeded");
+    expect(exceeded).toHaveLength(1);
+    expect(String(exceeded[0]!.data.reason)).toMatch(/maxNodeRuns/);
+  });
+
+  it("does not emit budget_exceeded when a run fails because a node failed", async () => {
+    const src = `
+name: nodefail
+budget: { maxUsd: 10, maxWallClockSec: 600, maxNodeRuns: 20 }
+nodes:
+  a: { type: command, run: "echo a" }
+  b: { type: command, run: "echo b" }
+edges:
+  - { from: a, to: b }
+  - { from: b, to: END }
+`;
+    const registry = {
+      command: stub("command", (i) => (i.prompt === "echo a" ? ok("a") : bad("boom"))),
+    };
+
+    const final = await execute(parseGraph(src), start(src), deps(registry));
+
+    expect(final.status).toBe("failed");
+    expect(log.read("run1").filter((e) => e.kind === "budget_exceeded")).toHaveLength(0);
+  });
+
+  it("does not emit budget_exceeded when a run pauses on a human node", async () => {
+    const src = `
+name: pause
+budget: { maxUsd: 10, maxWallClockSec: 600, maxNodeRuns: 20 }
+nodes:
+  a: { type: command, run: "echo a" }
+  h: { type: human, question: "Ship it?" }
+edges:
+  - { from: a, to: h }
+  - { from: h, to: END }
+`;
+    const registry = { command: stub("command", (i) => ok(i.prompt)) };
+
+    const final = await execute(parseGraph(src), start(src), deps(registry));
+
+    expect(final.status).toBe("paused");
+    expect(log.read("run1").filter((e) => e.kind === "budget_exceeded")).toHaveLength(0);
+  });
 });
