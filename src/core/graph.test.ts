@@ -317,4 +317,77 @@ edges:
 `);
     expect(() => parseGraph(src)).toThrow(/END/);
   });
+
+  it("accepts a node id containing a hyphen", () => {
+    const src = graph(`nodes:
+  my-node:
+    type: command
+    run: "true"
+edges:
+  - from: my-node
+    to: END
+`);
+    expect(parseGraph(src).nodes["my-node"]).toMatchObject({ type: "command", run: "true" });
+  });
+
+  it("rejects a node id containing a dot", () => {
+    const src = graph(`nodes:
+  "my.node":
+    type: command
+    run: "true"
+edges:
+  - from: "my.node"
+    to: END
+`);
+    expect(() => parseGraph(src)).toThrow(/my\.node/);
+  });
+
+  it("rejects a node id containing a space", () => {
+    const src = graph(`nodes:
+  "my node":
+    type: command
+    run: "true"
+edges:
+  - from: "my node"
+    to: END
+`);
+    expect(() => parseGraph(src)).toThrow(/must match/);
+  });
+
+  it("rejects a node id longer than 64 characters", () => {
+    const long = "a".repeat(65);
+    const src = graph(`nodes:
+  ${long}:
+    type: command
+    run: "true"
+edges:
+  - from: ${long}
+    to: END
+`);
+    expect(() => parseGraph(src)).toThrow(/must match/);
+  });
+
+  it("rejects a node id containing a path separator", () => {
+    const src = graph(`nodes:
+  "../escape":
+    type: command
+    run: "true"
+edges:
+  - from: "../escape"
+    to: END
+`);
+    expect(() => parseGraph(src)).toThrow(/must match/);
+  });
+
+  it("still reports END as reserved rather than as a bad character", () => {
+    const src = graph(`nodes:
+  END:
+    type: command
+    run: "true"
+edges:
+  - from: END
+    to: END
+`);
+    expect(() => parseGraph(src)).toThrow(/reserved/);
+  });
 });

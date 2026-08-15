@@ -141,6 +141,9 @@ export function parseGraph(source: string, sourceName = "graph"): Graph {
   const nodes: Record<string, NodeDef> = {};
   for (const [id, value] of Object.entries(rawNodes as Record<string, unknown>)) {
     if (id === END) fail(`node id "${END}" is reserved`);
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) {
+      fail(`node id "${id}" must match [A-Za-z0-9_-] and be 1-64 characters`);
+    }
     if (value === null || typeof value !== "object" || Array.isArray(value)) {
       fail(`node "${id}" must be a mapping`);
     }
