@@ -23,7 +23,7 @@ It does not call a model itself. Your agent CLIs are the runtime.
 npm i -g loomgraph
 ```
 
-Requires Node >= 20. The binary is `lg`.
+Requires Node >= 22. The binary is `lg`.
 
 ## 60-second quickstart
 
