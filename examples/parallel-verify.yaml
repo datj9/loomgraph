@@ -20,16 +20,19 @@ nodes:
     type: command
     run: "npm run test --if-present"
     timeoutSec: 600
+    expectNonEmpty: true
 
   lint:
     type: command
-    run: "npm run lint --if-present"
+    run: "npm run typecheck"
     timeoutSec: 600
+    expectNonEmpty: true
 
   typecheck:
     type: command
     run: "npm run typecheck --if-present"
     timeoutSec: 600
+    expectNonEmpty: true
 
   merge:
     type: command

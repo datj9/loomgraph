@@ -4,10 +4,19 @@ import type { Graph } from "../core/graph.js";
 import type { RunState } from "../core/types.js";
 
 const COST_NOTE =
-  "note: adapters that do not report a price (codex, opencode, command) record 0.0000 usd - the number is not estimated.";
+  "note: adapters that do not report a price (codex, command) record 0.0000 usd - the number is not estimated.";
 
 function pad(value: string, width: number): string {
   return value.length >= width ? value : value + " ".repeat(width - value.length);
+}
+
+export function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function durationSec(startedAt: string, endedAt: string | null): string {
@@ -93,4 +102,70 @@ export function parseVars(pairs: string[]): Record<string, string> {
     vars[pair.slice(0, eq)] = pair.slice(eq + 1);
   }
   return vars;
+}
+
+function reportDuration(startedAt: string, endedAt: string | null): string {
+  if (!startedAt || !endedAt) return "-";
+  const ms = Date.parse(endedAt) - Date.parse(startedAt);
+  if (Number.isNaN(ms)) return "-";
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
+export function renderReportHtml(state: RunState, events: LgEvent[]): string {
+  const esc = escapeHtml;
+
+  const nodeRows: string[] = [];
+  for (const nodeId of Object.keys(state.nodes)) {
+    const n = state.nodes[nodeId]!;
+    nodeRows.push(
+      `<tr><td>${esc(n.nodeId)}</td><td>${esc(n.status)}</td><td>${esc(String(n.attempts))}</td>` +
+        `<td>${esc(n.costUsd.toFixed(4))}</td><td>${esc(reportDuration(n.startedAt, n.endedAt))}</td></tr>`,
+    );
+    if (n.error !== null) {
+      nodeRows.push(`<tr><td colspan="5">${esc(n.error)}</td></tr>`);
+    }
+  }
+
+  const eventRows: string[] = [];
+  for (const e of events) {
+    eventRows.push(
+      `<tr><td>${esc(String(e.seq))}</td><td>${esc(e.ts)}</td><td>${esc(e.kind)}</td>` +
+        `<td>${esc(e.nodeId ?? "")}</td><td>${esc(JSON.stringify(e.data))}</td></tr>`,
+    );
+  }
+
+  const budgetLine =
+    `${state.spent.usd.toFixed(4)}/${state.budget.maxUsd.toFixed(4)} usd · ` +
+    `${Math.round(state.spent.wallClockSec)}s/${state.budget.maxWallClockSec}s wall clock · ` +
+    `${state.spent.nodeRuns}/${state.budget.maxNodeRuns} node runs`;
+
+  return (
+    "<!doctype html>" +
+    "<html>" +
+    "<head>" +
+    `<title>loomgraph run ${esc(state.runId)}</title>` +
+    "<style>" +
+    "body{font-family:system-ui,sans-serif;margin:2rem;max-width:64rem}" +
+    "table{border-collapse:collapse;width:100%;margin-bottom:1.5rem}" +
+    "td,th{border:1px solid #ccc;padding:.35rem .5rem;text-align:left}" +
+    "th{background:#eee}" +
+    "</style>" +
+    "</head>" +
+    "<body>" +
+    "<h1>loomgraph run</h1>" +
+    `<p>runId: ${esc(state.runId)}<br>graphName: ${esc(state.graphName)}<br>status: ${esc(state.status)}<br>` +
+    `cwd: ${esc(state.cwd)}<br>createdAt: ${esc(state.createdAt)}<br>updatedAt: ${esc(state.updatedAt)}</p>` +
+    "<h2>nodes</h2>" +
+    `<table><tr><th>node</th><th>status</th><th>attempts</th><th>cost usd</th><th>duration</th></tr>` +
+    nodeRows.join("") +
+    "</table>" +
+    `<p>${esc(budgetLine)}</p>` +
+    `<p>${esc(COST_NOTE)}</p>` +
+    "<h2>events</h2>" +
+    `<table><tr><th>seq</th><th>ts</th><th>kind</th><th>nodeId</th><th>data</th></tr>` +
+    eventRows.join("") +
+    "</table>" +
+    "</body>" +
+    "</html>"
+  );
 }

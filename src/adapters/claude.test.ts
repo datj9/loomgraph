@@ -7,6 +7,14 @@ const MAX_TURNS = `{"type":"result","subtype":"error_max_turns","result":"","tot
 // Note `subtype` is "success" while `is_error` is true - trusting subtype alone
 // makes an auth failure look like a completed agent run.
 const AUTH_FAILURE = `{"type":"result","subtype":"success","is_error":true,"result":"Failed to authenticate: OAuth session expired and could not be refreshed","terminal_reason":"api_error","total_cost_usd":0,"num_turns":1}`;
+// Captured from Claude Code 3.x: stdout is now a JSON array of message
+// objects whose last element carries the run result.
+const SUCCESS_ARRAY = `[
+  {"type":"system","subtype":"init","cwd":"/tmp/x","session_id":"SID"},
+  {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"BANANA"}]}},
+  {"type":"rate_limit_event","session_id":"SID"},
+  {"type":"result","subtype":"success","is_error":false,"num_turns":1,"stop_reason":"end_turn","total_cost_usd":0.2642395,"result":"BANANA","usage":{"input_tokens":4,"output_tokens":5}}
+]`;
 
 describe("buildClaudeArgs", () => {
   it("builds the verified non-interactive argv", () => {
@@ -31,6 +39,23 @@ describe("buildClaudeArgs", () => {
       "--permission-mode",
       "acceptEdits",
     ]);
+  });
+
+  it("appends --model when a model is given", () => {
+    expect(buildClaudeArgs("hi", undefined, "claude-opus-5")).toEqual([
+      "-p",
+      "hi",
+      "--output-format",
+      "json",
+      "--permission-mode",
+      "acceptEdits",
+      "--model",
+      "claude-opus-5",
+    ]);
+  });
+
+  it("omits --model when no model is given", () => {
+    expect(buildClaudeArgs("hi", 8)).not.toContain("--model");
   });
 });
 
@@ -77,5 +102,49 @@ describe("parseClaudeJson", () => {
   it("surfaces the auth failure text rather than swallowing it", () => {
     const out = parseClaudeJson(AUTH_FAILURE);
     expect(out.text).toMatch(/Failed to authenticate/);
+  });
+
+  it("extracts text and cost from the array-form result element", () => {
+    const out = parseClaudeJson(SUCCESS_ARRAY);
+    expect(out.ok).toBe(true);
+    expect(out.text).toBe("BANANA");
+    expect(out.costUsd).toBe(0.2642395);
+    expect(out.error).toBeNull();
+  });
+
+  it("records the cost from the array even when the result reports an error", () => {
+    const out = parseClaudeJson(`[
+      {"type":"system","subtype":"init","cwd":"/tmp/x","session_id":"SID"},
+      {"type":"result","subtype":"error_max_turns","is_error":false,"total_cost_usd":0.11,"result":""}
+    ]`);
+    expect(out.ok).toBe(false);
+    expect(out.text).toBe("");
+    expect(out.costUsd).toBe(0.11);
+    expect(out.error).toBe("claude run ended with subtype error_max_turns");
+  });
+
+  it("fails with a named error when the array carries no result element", () => {
+    const out = parseClaudeJson('[{"type":"system","subtype":"init"},{"type":"assistant"}]');
+    expect(out.ok).toBe(false);
+    expect(out.text).toBe("");
+    expect(out.costUsd).toBe(0);
+    expect(out.error).toBe("could not parse claude json output: no result element in array");
+  });
+
+  it("takes the last result element when an array carries more than one", () => {
+    const out = parseClaudeJson(`[
+      {"type":"system","subtype":"init"},
+      {"type":"result","subtype":"error_max_turns","is_error":false,"total_cost_usd":0.01,"result":""},
+      {"type":"result","subtype":"success","is_error":false,"total_cost_usd":0.99,"result":"second"}
+    ]`);
+    expect(out.ok).toBe(true);
+    expect(out.text).toBe("second");
+    expect(out.costUsd).toBe(0.99);
+  });
+
+  it("keeps the whole array as raw", () => {
+    const out = parseClaudeJson(SUCCESS_ARRAY);
+    expect(Array.isArray(out.raw)).toBe(true);
+    expect((out.raw as unknown[]).length).toBe(4);
   });
 });

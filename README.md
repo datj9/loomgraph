@@ -118,7 +118,7 @@ edges:
     to: END
 ```
 
-Templates resolve against run state: `{{vars.ticket}}` (or the shorthand `{{ticket}}`) and `{{nodes.<id>.output}}`. An unresolvable reference is an error, not an empty string.
+Templates resolve against run state: `{{vars.ticket}}` (or the shorthand `{{ticket}}`) and `{{nodes.<id>.output}}`. An unresolvable reference is an error, not an empty string and never a passthrough — which is why node ids are restricted to `[A-Za-z0-9_-]`, 1 to 64 characters. A dot would collide with the reference syntax itself, so `lg validate` rejects it rather than letting `{{nodes.my.node.output}}` mean nothing at run time.
 
 Check a graph before running it — `lg validate` catches unknown node ids, cycles, missing budgets, and bad adapters:
 
@@ -171,15 +171,26 @@ lg resume <runId> --answer approve="ship it"
 
 Every node accepts `retries` (default 0), `timeoutSec` (default 900), and `cwd`.
 
+A `command` node also accepts two optional assertions, because a shell command that exits 0
+having done nothing is not a passing check: `expectNonEmpty: true` fails the node when the
+command wrote no output, and `expect: "<literal>"` fails it when that substring is absent
+from stdout. `npm run lint --if-present` in a repo with no lint script is the case these
+exist for.
+
 ## Budgets
 
-Three ceilings, all enforced *before* each dispatch batch, all recorded in the checkpoint:
+Three ceilings, all enforced *before* each dispatch batch **and once more before a run is
+allowed to finish successfully**, all recorded in the checkpoint:
 
 - `maxUsd` — summed from what the adapters actually report.
 - `maxWallClockSec` — measured from the run's creation, so it survives a resume.
 - `maxNodeRuns` — counts every attempt, retries included.
 
 Hitting a ceiling stops the run with status `failed`, a `budget_exceeded` event naming the ceiling, and exit code 3. Nothing further is dispatched.
+
+A ceiling breached by the final batch fails the run too. A node that already finished keeps
+its result — the run fails, the work does not unwind — so `lg status` still shows what was
+done and exactly how far over the line it went.
 
 Cost numbers are never invented. Claude Code reports `total_cost_usd` and that number is used as-is; adapters that report no price record exactly `0.0000`, and `lg status` says so.
 
@@ -200,11 +211,26 @@ Event kinds: `run_started`, `node_started`, `node_finished`, `edge_crossed`, `bu
 
 | Adapter | Command it runs | Status |
 | --- | --- | --- |
-| `claude` | `claude -p <prompt> --output-format json --permission-mode acceptEdits --max-turns <n>` | Tested against Claude Code 2.1.232 |
+| `claude` | `claude -p <prompt> --output-format json --permission-mode acceptEdits --max-turns <n>` | Tested against Claude Code 2.1.232 and the array-form json output of 3.x |
 | `codex` | `codex exec <prompt> --json --skip-git-repo-check --sandbox read-only -C <cwd>` | Tested against codex-cli 0.145.0 |
-| `opencode` | `opencode run <prompt>` | **Experimental — never executed against a real binary.** The parser is unit-tested; the invocation is not. |
+| `opencode` | `opencode run --format json [-m <model>] <prompt>` | Tested against opencode 1.18.17 |
 
-Cost reporting differs by CLI: Claude Code reports `total_cost_usd`; Codex and OpenCode report nothing, and loomgraph records `0` rather than estimating from a price table. Wall-clock and node-run ceilings still apply to them.
+Cost reporting differs by CLI: Claude Code reports `total_cost_usd`, and OpenCode reports a price per step under `--format json` — which is the only reason this adapter uses that format, since the default one prints prose and no price at all. Codex reports nothing, and loomgraph records `0` for it rather than estimating from a price table. Wall-clock and node-run ceilings still apply either way.
+
+### Choosing a model
+
+An `agent` or `verifier` node may name the model it wants, passed straight through to the CLI:
+
+```yaml
+review:
+  type: verifier
+  adapter: opencode
+  model: "opencode-go/deepseek-v4-flash"
+  prompt: "Review the diff. Reply PASS or FAIL."
+  pass: "PASS"
+```
+
+Omit it and the CLI's own resolution decides, which is not always what the config says: with no `-m`, opencode ignored a configured `model` and fell through to a provider with no credentials. `OPENCODE_MODEL` is ignored — the flag is the only way. A `command` or `human` node that declares a model is a validation error rather than a silently ignored key.
 
 ### Environment
 
@@ -230,6 +256,7 @@ Both agent adapters close stdin before spawning. Codex otherwise prints `Reading
 | `lg status <runId>` | Per-node table plus the budget line |
 | `lg ls` | Every run with status and cost |
 | `lg validate <graph.yaml>` | Exit 0 if valid, else exit 1 with the specific error |
+| `lg report <runId> [--out path] [--publish] [--title t] [--visibility private\|org]` | Render the run to a self-contained html file; `--publish` hosts it with the `enclave` cli |
 | `lg events <runId> [--kind K]` | The JSONL audit trail, filterable |
 
 Exit codes: `0` success, `1` validation or usage error, `2` run failed, `3` budget exceeded, `4` paused awaiting a human.
@@ -239,6 +266,10 @@ Exit codes: `0` success, `1` validation or usage error, `2` run failed, `3` budg
 - **Not a model, and not an SDK for one.** loomgraph makes zero API calls of its own and has no LLM SDK dependency.
 - **Not a replacement for your agent CLI.** It shells out to the CLI you already installed and authenticated.
 - **Not a workflow server.** No daemon, no web UI, no cloud, no plugin system in v0.1.
+
+`lg report --publish` does not change that: it writes a static file and shells out to the
+`enclave` cli the same way a node shells out to `claude`. If `enclave` is not installed the
+report is still written, and nothing is uploaded.
 
 Concurrency caveat: fan-out nodes in v0.1 share one working directory. If two branches edit the same files, they will collide. Per-node git worktrees are phase 2.
 

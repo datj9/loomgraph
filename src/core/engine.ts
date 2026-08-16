@@ -54,7 +54,7 @@ export function newRunState(
 
 /** Resolve `{{vars.x}}`, `{{x}}` and `{{nodes.<id>.output}}` against the run state. */
 export function interpolate(template: string, state: RunState): string {
-  return template.replace(/\{\{\s*([A-Za-z0-9_.]+)\s*\}\}/g, (_match, ref: string) => {
+  return template.replace(/\{\{\s*([A-Za-z0-9_.\-]+)\s*\}\}/g, (_match, ref: string) => {
     const parts = ref.split(".");
     let value: unknown;
 
@@ -104,6 +104,24 @@ export function readySet(graph: Graph, state: RunState): string[] {
     if (state.completed.includes(id)) return false;
     return incoming.get(id)!.every((edge) => predicateHolds(edge, state));
   });
+}
+
+/**
+ * Assert a command node's opt-in expectations against its stdout. Returns null
+ * when the node satisfies them, otherwise the failure message. A shell command
+ * that exits 0 having done nothing is not a passing check.
+ */
+export function checkCommandExpectations(
+  node: { expect?: string; expectNonEmpty?: boolean },
+  text: string,
+): string | null {
+  if (node.expectNonEmpty === true && text.trim() === "") {
+    return "command produced no output but expectNonEmpty is set";
+  }
+  if (typeof node.expect === "string" && node.expect !== "" && text.includes(node.expect) === false) {
+    return `command output did not contain the expected string: ${node.expect}`;
+  }
+  return null;
 }
 
 /**
@@ -205,7 +223,14 @@ export async function execute(graph: Graph, initial: RunState, deps: EngineDeps)
     const cwd = nodeCwd(def, state);
 
     if (def.type === "command") {
-      return adapter.run({ prompt: interpolate(def.run, state), cwd, timeoutSec: def.timeoutSec });
+      const out = await adapter.run({ prompt: interpolate(def.run, state), cwd, timeoutSec: def.timeoutSec });
+      if (out.ok) {
+        const expectationError = checkCommandExpectations(def, out.text);
+        if (expectationError !== null) {
+          return { ...out, ok: false, error: expectationError };
+        }
+      }
+      return out;
     }
     if (def.type === "human") {
       throw new EngineError(`human node "${id}" cannot be dispatched to an adapter`);
@@ -215,6 +240,7 @@ export async function execute(graph: Graph, initial: RunState, deps: EngineDeps)
       prompt: interpolate(def.prompt, state),
       cwd,
       maxTurns: def.maxTurns,
+      model: def.model,
       timeoutSec: def.timeoutSec,
     });
 
@@ -243,7 +269,14 @@ export async function execute(graph: Graph, initial: RunState, deps: EngineDeps)
   };
 
   while (true) {
-    if (endReached(graph, state)) return finish("succeeded", null);
+    if (endReached(graph, state)) {
+      const check = checkBudget(state);
+      if (!check.ok) {
+        emit({ kind: "budget_exceeded", data: { reason: check.reason, spent: state.spent, budget: state.budget } });
+        return finish("failed", check.reason);
+      }
+      return finish("succeeded", null);
+    }
 
     const ready = readySet(graph, state);
     if (ready.length === 0) {

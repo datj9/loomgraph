@@ -8,10 +8,15 @@ import type { Adapter, AdapterInput, AdapterOutput } from "./types.js";
  *
  * stdout is a single JSON object with `subtype`, `result`, `session_id`,
  * `num_turns` and `total_cost_usd`.
+ *
+ * Claude Code 3.x emits a JSON *array* of message objects whose last
+ * `type: "result"` element carries the run result, so the parser finds that
+ * element before reading `subtype` and `total_cost_usd`.
  */
-export function buildClaudeArgs(prompt: string, maxTurns?: number): string[] {
+export function buildClaudeArgs(prompt: string, maxTurns?: number, model?: string): string[] {
   const args = ["-p", prompt, "--output-format", "json", "--permission-mode", "acceptEdits"];
   if (maxTurns !== undefined) args.push("--max-turns", String(maxTurns));
+  if (model !== undefined) args.push("--model", model);
   return args;
 }
 
@@ -22,9 +27,9 @@ export function parseClaudeJson(stdout: string): AdapterOutput {
   } catch {
     return {
       ok: false,
-      text: stdout,
+      text: "",
       costUsd: 0,
-      raw: stdout,
+      raw: null,
       error: `could not parse claude json output: ${stdout.slice(0, 200)}`,
     };
   }
@@ -33,30 +38,50 @@ export function parseClaudeJson(stdout: string): AdapterOutput {
     return { ok: false, text: stdout, costUsd: 0, raw: parsed, error: "could not parse claude json output: not an object" };
   }
 
-  const obj = parsed as Record<string, unknown>;
-  const cost = typeof obj.total_cost_usd === "number" ? obj.total_cost_usd : 0;
-  const text = typeof obj.result === "string" ? obj.result : "";
-  const subtype = typeof obj.subtype === "string" ? obj.subtype : "unknown";
+  // Claude Code 3.x emits an array of messages; the run result is the last
+  // element with `type: "result"`. The legacy single-object form is `result`
+  // itself.
+  let result: Record<string, unknown>;
+  if (Array.isArray(parsed)) {
+    const items = parsed as unknown[];
+    let found: Record<string, unknown> | undefined;
+    for (const item of items) {
+      if (typeof item === "object" && item !== null && (item as Record<string, unknown>).type === "result") {
+        found = item as Record<string, unknown>;
+      }
+    }
+    if (found === undefined) {
+      return { ok: false, text: "", costUsd: 0, raw: parsed, error: "could not parse claude json output: no result element in array" };
+    }
+    result = found;
+  } else {
+    result = parsed as Record<string, unknown>;
+  }
+
+  // Cost is harvested even on failure - budget accounting depends on it.
+  const costUsd = typeof result.total_cost_usd === "number" ? result.total_cost_usd : 0;
+  const text = typeof result.result === "string" ? result.result : "";
 
   // Claude Code can report `subtype: "success"` while `is_error` is true - an
   // expired OAuth session comes back exactly that way. Trusting subtype alone
   // makes an auth failure look like a completed agent run, so check both.
-  if (obj.is_error === true) {
-    const reason = typeof obj.terminal_reason === "string" ? obj.terminal_reason : "is_error";
+  if (result.is_error === true) {
+    const reason = typeof result.subtype === "string" ? result.subtype : "is_error";
     return {
       ok: false,
       text,
-      costUsd: cost,
+      costUsd,
       raw: parsed,
       error: `claude run reported is_error (${reason}): ${text || "no message"}`,
     };
   }
 
+  const subtype = typeof result.subtype === "string" ? result.subtype : "unknown";
   if (subtype !== "success") {
-    return { ok: false, text, costUsd: cost, raw: parsed, error: `claude run ended with subtype ${subtype}` };
+    return { ok: false, text, costUsd, raw: parsed, error: `claude run ended with subtype ${subtype}` };
   }
 
-  return { ok: true, text, costUsd: cost, raw: parsed, error: null };
+  return { ok: true, text, costUsd, raw: parsed, error: null };
 }
 
 export class ClaudeAdapter implements Adapter {
@@ -65,7 +90,7 @@ export class ClaudeAdapter implements Adapter {
   constructor(private readonly bin = "claude") {}
 
   async run(input: AdapterInput): Promise<AdapterOutput> {
-    const args = buildClaudeArgs(input.prompt, input.maxTurns);
+    const args = buildClaudeArgs(input.prompt, input.maxTurns, input.model);
     const result = await execa(this.bin, args, {
       cwd: input.cwd,
       timeout: input.timeoutSec * 1000,

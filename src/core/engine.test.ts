@@ -6,6 +6,7 @@ import { parseGraph } from "./graph.js";
 import { CheckpointStore } from "./store.js";
 import { EventLog } from "./events.js";
 import { execute, newRunState, interpolate, readySet, EngineError } from "./engine.js";
+import * as engine from "./engine.js";
 import type { EngineDeps } from "./engine.js";
 import type { Adapter, AdapterInput, AdapterOutput } from "../adapters/types.js";
 import type { RunState } from "./types.js";
@@ -54,6 +55,15 @@ edges:
   - { from: c, to: END }
 `;
 
+const HYPHEN = `
+name: hyphen
+budget: { maxUsd: 10, maxWallClockSec: 600, maxNodeRuns: 20 }
+nodes:
+  my-node: { type: command, run: "echo HI" }
+edges:
+  - { from: my-node, to: END }
+`;
+
 const FANOUT = `
 name: fanout
 budget: { maxUsd: 10, maxWallClockSec: 600, maxNodeRuns: 20 }
@@ -83,6 +93,39 @@ describe("interpolate", () => {
   it("throws naming an unresolvable reference", () => {
     expect(() => interpolate("{{vars.nope}}", start(LINEAR))).toThrow(/nope/);
   });
+
+  it("resolves a node output whose id contains a hyphen", () => {
+    const state = start(HYPHEN);
+    state.nodes["my-node"] = {
+      nodeId: "my-node", status: "succeeded", startedAt: "", endedAt: null,
+      attempts: 1, output: "HI", error: null, costUsd: 0,
+    };
+    expect(interpolate("[{{nodes.my-node.output}}]", state)).toBe("[HI]");
+  });
+
+  it("throws naming an unresolvable hyphenated reference", () => {
+    expect(() => interpolate("{{nodes.no-such.output}}", start(LINEAR))).toThrow(
+      new EngineError('unknown template reference "{{nodes.no-such.output}}"'),
+    );
+  });
+
+  it("honours whitespace padding around a hyphenated reference", () => {
+    const state = start(HYPHEN);
+    state.nodes["my-node"] = {
+      nodeId: "my-node", status: "succeeded", startedAt: "", endedAt: null,
+      attempts: 1, output: "HI", error: null, costUsd: 0,
+    };
+    expect(interpolate("{{ nodes.my-node.output }}", state)).toBe("HI");
+  });
+
+  it("leaves hyphens in surrounding literal text untouched", () => {
+    const state = start(HYPHEN);
+    state.nodes["my-node"] = {
+      nodeId: "my-node", status: "succeeded", startedAt: "", endedAt: null,
+      attempts: 1, output: "HI", error: null, costUsd: 0,
+    };
+    expect(interpolate("a-b {{nodes.my-node.output}} c-d", state)).toBe("a-b HI c-d");
+  });
 });
 
 describe("readySet", () => {
@@ -94,6 +137,35 @@ describe("readySet", () => {
     state.completed = ["a"];
     state.nodes.a = { nodeId: "a", status: "succeeded", startedAt: "", endedAt: null, attempts: 1, output: "", error: null, costUsd: 0 };
     expect(readySet(graph, state).sort()).toEqual(["b", "c"]);
+  });
+});
+
+describe("checkCommandExpectations", () => {
+  const check = (engine as unknown as {
+    checkCommandExpectations: (
+      node: { expect?: string; expectNonEmpty?: boolean },
+      text: string,
+    ) => string | null;
+  }).checkCommandExpectations;
+
+  it("returns null when no expectations are declared", () => {
+    expect(check({}, "anything")).toBeNull();
+  });
+
+  it("fails when expectNonEmpty is set and the output is blank", () => {
+    expect(check({ expectNonEmpty: true }, "  \n ")).toBe("command produced no output but expectNonEmpty is set");
+  });
+
+  it("fails when the expect substring is absent", () => {
+    expect(check({ expect: "PASS" }, "FAILED")).toBe("command output did not contain the expected string: PASS");
+  });
+
+  it("passes when the expect substring is present", () => {
+    expect(check({ expect: "PASS" }, "the result is PASS today")).toBeNull();
+  });
+
+  it("prefers the blank-output message when both expectations fail", () => {
+    expect(check({ expect: "PASS", expectNonEmpty: true }, "")).toBe("command produced no output but expectNonEmpty is set");
   });
 });
 
@@ -330,6 +402,24 @@ edges:
     expect(final.nodes.v!.error).toMatch(/PASS/);
   });
 
+  it("fails a command node whose output does not meet its expectations", async () => {
+    const src = `
+name: expect
+budget: { maxUsd: 10, maxWallClockSec: 600, maxNodeRuns: 20 }
+nodes:
+  a: { type: command, run: "npm run lint --if-present", expectNonEmpty: true }
+edges:
+  - { from: a, to: END }
+`;
+    const registry = { command: stub("command", () => ok("")) };
+
+    const final = await execute(parseGraph(src), start(src), deps(registry));
+
+    expect(final.status).toBe("failed");
+    expect(final.nodes.a!.status).toBe("failed");
+    expect(final.nodes.a!.error).toBe("command produced no output but expectNonEmpty is set");
+  });
+
   it("interpolates vars and upstream node output into an agent prompt", async () => {
     const src = `
 name: templated
@@ -376,5 +466,234 @@ edges:
     expect(final.spent.nodeRuns).toBe(2);
     expect(final.status).toBe("failed");
     expect(final.nodes.c).toBeUndefined();
+  });
+
+  it("fails a run whose final spend exceeds the usd ceiling", async () => {
+    const src = `
+name: overshoot
+budget: { maxUsd: 0.30, maxWallClockSec: 600, maxNodeRuns: 20 }
+nodes:
+  a: { type: command, run: "echo a" }
+  b: { type: command, run: "echo b" }
+edges:
+  - { from: a, to: b }
+  - { from: b, to: END }
+`;
+    const registry = {
+      command: stub("command", (i) => (i.prompt === "echo a" ? ok("a", 0.2726) : ok("b", 0.2645))),
+    };
+
+    const final = await execute(parseGraph(src), start(src), deps(registry));
+
+    expect(final.status).toBe("failed");
+  });
+
+  it("emits budget_exceeded naming the ceiling when the last batch overshoots", async () => {
+    const src = `
+name: overshoot-event
+budget: { maxUsd: 0.30, maxWallClockSec: 600, maxNodeRuns: 20 }
+nodes:
+  a: { type: command, run: "echo a" }
+  b: { type: command, run: "echo b" }
+edges:
+  - { from: a, to: b }
+  - { from: b, to: END }
+`;
+    const registry = {
+      command: stub("command", (i) => (i.prompt === "echo a" ? ok("a", 0.2726) : ok("b", 0.2645))),
+    };
+
+    await execute(parseGraph(src), start(src), deps(registry));
+
+    const exceeded = log.read("run1").filter((e) => e.kind === "budget_exceeded");
+    expect(exceeded).toHaveLength(1);
+    expect(String(exceeded[0]!.data.reason)).toMatch(/maxUsd/);
+  });
+
+  it("keeps every completed node result when the final budget check fails", async () => {
+    const src = `
+name: overshoot-keep
+budget: { maxUsd: 0.30, maxWallClockSec: 600, maxNodeRuns: 20 }
+nodes:
+  a: { type: command, run: "echo a" }
+  b: { type: command, run: "echo b" }
+edges:
+  - { from: a, to: b }
+  - { from: b, to: END }
+`;
+    const registry = {
+      command: stub("command", (i) => (i.prompt === "echo a" ? ok("a", 0.2726) : ok("b", 0.2645))),
+    };
+
+    const final = await execute(parseGraph(src), start(src), deps(registry));
+
+    expect(final.status).toBe("failed");
+    expect(final.nodes.a!.status).toBe("succeeded");
+    expect(final.nodes.a!.costUsd).toBe(0.2726);
+    expect(final.nodes.b!.status).toBe("succeeded");
+    expect(final.nodes.b!.costUsd).toBe(0.2645);
+  });
+
+  it("succeeds when the final spend stays under the ceiling", async () => {
+    const src = `
+name: under
+budget: { maxUsd: 0.30, maxWallClockSec: 600, maxNodeRuns: 20 }
+nodes:
+  a: { type: command, run: "echo a" }
+  b: { type: command, run: "echo b" }
+edges:
+  - { from: a, to: b }
+  - { from: b, to: END }
+`;
+    const registry = {
+      command: stub("command", (i) => (i.prompt === "echo a" ? ok("a", 0.2) : ok("b", 0.0999))),
+    };
+
+    const final = await execute(parseGraph(src), start(src), deps(registry));
+
+    expect(final.status).toBe("succeeded");
+    expect(log.read("run1").filter((e) => e.kind === "budget_exceeded")).toHaveLength(0);
+  });
+
+  it("treats a final spend exactly at the usd ceiling as a breach", async () => {
+    const src = `
+name: exactly
+budget: { maxUsd: 0.30, maxWallClockSec: 600, maxNodeRuns: 20 }
+nodes:
+  a: { type: command, run: "echo a" }
+  b: { type: command, run: "echo b" }
+edges:
+  - { from: a, to: b }
+  - { from: b, to: END }
+`;
+    const registry = {
+      command: stub("command", (i) => (i.prompt === "echo a" ? ok("a", 0.15) : ok("b", 0.15))),
+    };
+
+    const final = await execute(parseGraph(src), start(src), deps(registry));
+
+    expect(final.status).toBe("failed");
+  });
+
+  it("fails a run whose final node-run count exceeds maxNodeRuns", async () => {
+    const src = `
+name: runcap
+budget: { maxUsd: 10, maxWallClockSec: 600, maxNodeRuns: 2 }
+nodes:
+  a: { type: command, run: "echo a" }
+  b: { type: command, run: "echo b" }
+edges:
+  - { from: a, to: b }
+  - { from: b, to: END }
+`;
+    const registry = { command: stub("command", (i) => ok(i.prompt)) };
+
+    const final = await execute(parseGraph(src), start(src), deps(registry));
+
+    expect(final.status).toBe("failed");
+    const exceeded = log.read("run1").filter((e) => e.kind === "budget_exceeded");
+    expect(exceeded).toHaveLength(1);
+    expect(String(exceeded[0]!.data.reason)).toMatch(/maxNodeRuns/);
+  });
+
+  it("does not emit budget_exceeded when a run fails because a node failed", async () => {
+    const src = `
+name: nodefail
+budget: { maxUsd: 10, maxWallClockSec: 600, maxNodeRuns: 20 }
+nodes:
+  a: { type: command, run: "echo a" }
+  b: { type: command, run: "echo b" }
+edges:
+  - { from: a, to: b }
+  - { from: b, to: END }
+`;
+    const registry = {
+      command: stub("command", (i) => (i.prompt === "echo a" ? ok("a") : bad("boom"))),
+    };
+
+    const final = await execute(parseGraph(src), start(src), deps(registry));
+
+    expect(final.status).toBe("failed");
+    expect(log.read("run1").filter((e) => e.kind === "budget_exceeded")).toHaveLength(0);
+  });
+
+  it("does not emit budget_exceeded when a run pauses on a human node", async () => {
+    const src = `
+name: pause
+budget: { maxUsd: 10, maxWallClockSec: 600, maxNodeRuns: 20 }
+nodes:
+  a: { type: command, run: "echo a" }
+  h: { type: human, question: "Ship it?" }
+edges:
+  - { from: a, to: h }
+  - { from: h, to: END }
+`;
+    const registry = { command: stub("command", (i) => ok(i.prompt)) };
+
+    const final = await execute(parseGraph(src), start(src), deps(registry));
+
+    expect(final.status).toBe("paused");
+    expect(log.read("run1").filter((e) => e.kind === "budget_exceeded")).toHaveLength(0);
+  });
+});
+
+describe("model passthrough", () => {
+  const WITH_MODEL = `
+name: m
+budget:
+  maxUsd: 1
+  maxWallClockSec: 60
+  maxNodeRuns: 5
+nodes:
+  a:
+    type: agent
+    adapter: claude
+    prompt: "hi"
+    model: "claude-opus-5"
+edges:
+  - from: a
+    to: END
+`;
+
+  const WITHOUT_MODEL = `
+name: m
+budget:
+  maxUsd: 1
+  maxWallClockSec: 60
+  maxNodeRuns: 5
+nodes:
+  a:
+    type: agent
+    adapter: claude
+    prompt: "hi"
+edges:
+  - from: a
+    to: END
+`;
+
+  it("passes a node's model through to the adapter", async () => {
+    let seen: AdapterInput | null = null;
+    const registry = {
+      claude: stub("claude", (input) => {
+        seen = input;
+        return ok("done");
+      }),
+    };
+    await execute(parseGraph(WITH_MODEL), start(WITH_MODEL), deps(registry));
+    expect(seen).not.toBeNull();
+    expect(seen!.model).toBe("claude-opus-5");
+  });
+
+  it("leaves model undefined on the adapter input when the node declares none", async () => {
+    let seen: AdapterInput | null = null;
+    const registry = {
+      claude: stub("claude", (input) => {
+        seen = input;
+        return ok("done");
+      }),
+    };
+    await execute(parseGraph(WITHOUT_MODEL), start(WITHOUT_MODEL), deps(registry));
+    expect(seen).not.toBeNull();
+    expect(seen!.model).toBeUndefined();
   });
 });

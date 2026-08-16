@@ -182,6 +182,74 @@ edges:
     expect(() => parseGraph(src)).toThrow(/maxUsd/);
   });
 
+  it("accepts an agent node with an explicit model", () => {
+    const src = graph(`nodes:
+  a:
+    type: agent
+    adapter: opencode
+    prompt: "hi"
+    model: "opencode-go/deepseek-v4-flash"
+edges:
+  - from: a
+    to: END
+`);
+    const parsed = parseGraph(src);
+    const node = parsed.nodes["a"];
+    expect(node?.type).toBe("agent");
+    if (node?.type === "agent") expect(node.model).toBe("opencode-go/deepseek-v4-flash");
+  });
+
+  it("accepts a verifier node with an explicit model", () => {
+    const src = graph(`nodes:
+  a:
+    type: verifier
+    adapter: codex
+    prompt: "hi"
+    pass: "PASS"
+    model: "gpt-5.6-sol"
+edges:
+  - from: a
+    to: END
+`);
+    const node = parseGraph(src).nodes["a"];
+    if (node?.type === "verifier") expect(node.model).toBe("gpt-5.6-sol");
+    else throw new Error("expected a verifier node");
+  });
+
+  it("leaves model undefined when a node does not declare one", () => {
+    const node = parseGraph(FULL_EXAMPLE).nodes["reproduce"];
+    if (node?.type === "agent") expect(node.model).toBeUndefined();
+    else throw new Error("expected an agent node");
+  });
+
+  it("rejects an agent node whose model is an empty string", () => {
+    const src = graph(`nodes:
+  a:
+    type: agent
+    adapter: claude
+    prompt: "hi"
+    model: ""
+edges:
+  - from: a
+    to: END
+`);
+    expect(() => parseGraph(src)).toThrow(/a/);
+  });
+
+  it("rejects a command node that declares a model", () => {
+    const src = graph(`nodes:
+  a:
+    type: command
+    run: "echo hi"
+    model: "claude-opus-5"
+edges:
+  - from: a
+    to: END
+`);
+    expect(() => parseGraph(src)).toThrow(/a/);
+    expect(() => parseGraph(src)).toThrow(/model/);
+  });
+
   it("rejects an agent node with an unknown adapter", () => {
     const src = graph(`nodes:
   a:
@@ -231,6 +299,38 @@ edges:
     to: END
 `);
     expect(() => parseGraph(src)).toThrow(/run/);
+  });
+
+  it("accepts a command node with expect and expectNonEmpty", () => {
+    const src = graph(`nodes:
+  a:
+    type: command
+    run: "npm test"
+    expect: "0 failed"
+    expectNonEmpty: true
+edges:
+  - from: a
+    to: END
+`);
+    expect(parseGraph(src).nodes.a).toMatchObject({
+      type: "command",
+      run: "npm test",
+      expect: "0 failed",
+      expectNonEmpty: true,
+    });
+  });
+
+  it("rejects a command node whose expect is an empty string", () => {
+    const src = graph(`nodes:
+  a:
+    type: command
+    run: "npm test"
+    expect: ""
+edges:
+  - from: a
+    to: END
+`);
+    expect(() => parseGraph(src)).toThrow(/node "a"/);
   });
 
   it("rejects a human node without a question", () => {
@@ -284,5 +384,78 @@ edges:
     to: a
 `);
     expect(() => parseGraph(src)).toThrow(/END/);
+  });
+
+  it("accepts a node id containing a hyphen", () => {
+    const src = graph(`nodes:
+  my-node:
+    type: command
+    run: "true"
+edges:
+  - from: my-node
+    to: END
+`);
+    expect(parseGraph(src).nodes["my-node"]).toMatchObject({ type: "command", run: "true" });
+  });
+
+  it("rejects a node id containing a dot", () => {
+    const src = graph(`nodes:
+  "my.node":
+    type: command
+    run: "true"
+edges:
+  - from: "my.node"
+    to: END
+`);
+    expect(() => parseGraph(src)).toThrow(/my\.node/);
+  });
+
+  it("rejects a node id containing a space", () => {
+    const src = graph(`nodes:
+  "my node":
+    type: command
+    run: "true"
+edges:
+  - from: "my node"
+    to: END
+`);
+    expect(() => parseGraph(src)).toThrow(/must match/);
+  });
+
+  it("rejects a node id longer than 64 characters", () => {
+    const long = "a".repeat(65);
+    const src = graph(`nodes:
+  ${long}:
+    type: command
+    run: "true"
+edges:
+  - from: ${long}
+    to: END
+`);
+    expect(() => parseGraph(src)).toThrow(/must match/);
+  });
+
+  it("rejects a node id containing a path separator", () => {
+    const src = graph(`nodes:
+  "../escape":
+    type: command
+    run: "true"
+edges:
+  - from: "../escape"
+    to: END
+`);
+    expect(() => parseGraph(src)).toThrow(/must match/);
+  });
+
+  it("still reports END as reserved rather than as a bad character", () => {
+    const src = graph(`nodes:
+  END:
+    type: command
+    run: "true"
+edges:
+  - from: END
+    to: END
+`);
+    expect(() => parseGraph(src)).toThrow(/reserved/);
   });
 });

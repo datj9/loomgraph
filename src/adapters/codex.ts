@@ -29,10 +29,16 @@ import type { Adapter, AdapterInput, AdapterOutput } from "./types.js";
  */
 export type CodexSandbox = "read-only" | "workspace-write" | "bypass";
 
-export function buildCodexArgs(prompt: string, cwd: string, sandbox: CodexSandbox = "read-only"): string[] {
+export function buildCodexArgs(
+  prompt: string,
+  cwd: string,
+  sandbox: CodexSandbox = "read-only",
+  model?: string,
+): string[] {
   const policy =
     sandbox === "bypass" ? ["--dangerously-bypass-approvals-and-sandbox"] : ["--sandbox", sandbox];
-  return ["exec", prompt, "--json", "--skip-git-repo-check", ...policy, "-C", cwd];
+  const chosen = model === undefined ? [] : ["--model", model];
+  return ["exec", prompt, "--json", "--skip-git-repo-check", ...policy, ...chosen, "-C", cwd];
 }
 
 /** Pull agent message text out of the several event shapes codex has shipped. */
@@ -128,7 +134,7 @@ export class CodexAdapter implements Adapter {
   ) {}
 
   async run(input: AdapterInput): Promise<AdapterOutput> {
-    const result = await execa(this.bin, buildCodexArgs(input.prompt, input.cwd, this.sandbox), {
+    const result = await execa(this.bin, buildCodexArgs(input.prompt, input.cwd, this.sandbox, input.model), {
       cwd: input.cwd,
       timeout: input.timeoutSec * 1000,
       reject: false,
