@@ -4,7 +4,8 @@
   "description": "Compose Claude Code, Codex, and OpenCode runs into a checkpointed graph - resumable, budgeted, auditable.",
   "type": "module",
   "bin": {
-    "lg": "./dist/cli.js"
+    "lg": "./dist/cli.js",
+    "lg-handoff": "./dist/handoff/cli.js"
   },
   "main": "./dist/index.js",
   "files": [
