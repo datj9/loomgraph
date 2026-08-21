@@ -14,7 +14,7 @@ node dist/cli.js run examples/hello.yaml   # smoke test, zero cost
 
 ## Hard rules
 
-- **Tests never spawn a real agent CLI.** No test may execute `claude`, `codex`, or `opencode`, and no test may make a network request. Adapter tests parse fixture strings; engine tests inject stub adapters through the registry argument.
+- **Tests never spawn a real agent CLI.** No test may execute `claude`, `codex`, `opencode`, `enclave`, or `git`, and no test may make a network request. Adapter tests parse fixture strings; engine tests inject stub adapters through the registry argument; `src/handoff/` routes every spawn - including `opencode export` and `enclave push` - through an injected `Exec` seam that tests replace with a fake.
 - **Never invent cost numbers.** If a CLI does not report a price, record `0`. Do not derive cost from a token count and a price table anywhere in this codebase.
 - **Checkpoint after every edge crossing.** Not at the end of a batch, not at the end of the run. `CheckpointStore.save` writes a temp file and renames it; never write `state.json` in place.
 - **The event log is append-only and unbuffered.** A killed process must leave a readable JSONL log. Do not add buffering or rewrite past lines.
@@ -35,8 +35,14 @@ node dist/cli.js run examples/hello.yaml   # smoke test, zero cost
 src/core/       types, store, events, graph, budget, engine  (no CLI concerns)
 src/adapters/   one file per executor, plus the registry
 src/commands/   CLI command implementations and pure renderers
+src/handoff/    the `lg-handoff` bin: session readers, secret scanner, brief renderer
 examples/       graph files that must stay valid (`lg validate`)
 ```
+
+Nothing under `src/handoff/` may import from `src/core/` or `src/adapters/`. The subtree
+owns its own enclave helpers so it stays extractable into a sibling package with a `git mv`.
+That is why `buildEnclavePushArgs` exists twice and neither copy should be deduplicated
+into a shared module.
 
 Pure functions (`readySet`, `interpolate`, `planLevels`, `renderStatus`, `checkBudget`, every parser) are exported so they can be unit-tested directly. Keep them pure.
 
