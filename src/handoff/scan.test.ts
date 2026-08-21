@@ -5,11 +5,11 @@
 // word "task-list" or on any base64 blob starting with `eyJ` gets ignored, and
 // an ignored scanner is worse than none.
 
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { SCAN_RULES, rewritePaths, scanBundleDir, scanText, stripUrlCredentials } from "./scan.js";
+import { SCAN_RULES, UNREADABLE_RULE, rewritePaths, scanBundleDir, scanText, stripUrlCredentials } from "./scan.js";
 
 function rules(text: string): string[] {
   return scanText(text, "f.md").map((f) => f.rule);
@@ -334,12 +334,46 @@ describe("scanBundleDir", () => {
     ]);
   });
 
-  it("returns nothing for a missing path or a file", () => {
+  it("fails closed on a missing path or a plain file, never reporting clean", () => {
+    // An empty result means "clean, safe to publish" to every caller, so a path
+    // the scanner could not read must never produce one.
     const dir = makeDir();
     const file = join(dir, "handoff.md");
     writeFileSync(file, shaped("AKIA", "FAKEFAKEFAKE0000"), "utf8");
-    expect(scanBundleDir(join(dir, "does-not-exist"))).toEqual([]);
-    expect(scanBundleDir(file)).toEqual([]);
+
+    const missing = scanBundleDir(join(dir, "does-not-exist"));
+    expect(missing.map((f) => f.rule)).toEqual([UNREADABLE_RULE]);
+
+    const notADir = scanBundleDir(file);
+    expect(notADir.map((f) => f.rule)).toEqual([UNREADABLE_RULE]);
+  });
+
+  it("reports an unreadable file instead of silently skipping it", () => {
+    const dir = makeDir();
+    writeFileSync(join(dir, "clean.md"), "nothing to see\n", "utf8");
+    const secret = join(dir, "leak.md");
+    writeFileSync(secret, shaped("AKIA", "FAKEFAKEFAKE0000"), "utf8");
+    chmodSync(secret, 0o000);
+    let stillReadable = false;
+    try {
+      readFileSync(secret, "utf8");
+      stillReadable = true;
+    } catch {
+      // expected: the point of the test
+    }
+    if (stillReadable) {
+      // Running as a user that ignores the mode (e.g. root). The assertion below
+      // would be meaningless, so skip rather than pass vacuously.
+      chmodSync(secret, 0o644);
+      return;
+    }
+
+    const findings = scanBundleDir(dir);
+    chmodSync(secret, 0o644);
+    // The old behaviour was `continue`, which reported this bundle as clean -
+    // identical output to a bundle that was read and found innocent.
+    expect(findings.map((f) => f.rule)).toContain(UNREADABLE_RULE);
+    expect(findings.find((f) => f.rule === UNREADABLE_RULE)?.file).toBe("leak.md");
   });
 });
 
