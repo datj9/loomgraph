@@ -44,7 +44,7 @@ export const SCAN_RULES: ReadonlyArray<{
   },
   {
     name: "github-token",
-    pattern: /\b(?:gh[pos]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{20,})/,
+    pattern: /\b(?:gh[posur]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{20,})/,
     description: "GitHub personal access / OAuth / server token",
   },
   {
@@ -76,15 +76,47 @@ export const SCAN_RULES: ReadonlyArray<{
   },
   {
     name: "env-assignment",
-    // Uppercase env-var convention only, and the value must be non-empty:
+    // Case-insensitive: a .env line is upper-case by convention but a JSON key
+    // or a lower-case shell export is the same secret. The name may also BE the
+    // word (`password: x`), not just end in it. The value must be non-empty:
     // `FOO_TOKEN=` and `FOO_TOKEN=""` are placeholders, not secrets.
-    pattern: /\b[A-Z][A-Z0-9_]*_(?:TOKEN|SECRET|KEY|PASSWORD)\s*[:=]\s*(?:"[^"\s]+"|'[^'\s]+'|[^\s"';,]+)/,
-    description: "Assignment to a *_TOKEN / *_SECRET / *_KEY / *_PASSWORD name",
+    pattern:
+      /(?:[A-Za-z0-9_]*_)?(?:TOKEN|SECRET|PASSWD|PASSWORD|API_?KEY)"?\s*[:=]\s*(?:"[^"\s]+"|'[^'\s]+'|[^\s"';,]+)/i,
+    description: "Assignment to a token / secret / password / api-key name",
+  },
+  {
+    name: "url-credentials",
+    // scheme://user:password@host - the shape a git remote, a database URI and
+    // a curl command all use. This is the rule that catches a credential-
+    // bearing `git remote get-url` value, which no vendor-prefix rule can.
+    pattern: /\b[a-z][a-z0-9+.-]*:\/\/[^/\s:@]+:[^/\s@]+@/i,
+    description: "Credentials embedded in a URL (scheme://user:pass@host)",
+  },
+  {
+    name: "stripe-key",
+    // Underscore, not hyphen - so `generic-sk-key` cannot catch these.
+    pattern: /\bsk_(?:live|test)_[A-Za-z0-9]{16,}/,
+    description: "Stripe secret key",
+  },
+  {
+    name: "gitlab-token",
+    pattern: /\bglpat-[A-Za-z0-9_-]{16,}/,
+    description: "GitLab personal access token",
+  },
+  {
+    name: "npm-token",
+    pattern: /\bnpm_[A-Za-z0-9]{30,}/,
+    description: "npm access token",
+  },
+  {
+    name: "sendgrid-key",
+    pattern: /\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}/,
+    description: "SendGrid API key",
   },
   {
     name: "abs-home-path",
     // Residual absolute home directory left after rewritePaths ran.
-    pattern: /(?:\/Users\/[^/\s:"'\\]+\/|\/home\/[^/\s:"'\\]+\/|C:\\Users\\[^\\\s:"']+\\)/,
+    pattern: /(?:\/Users\/[^/\s:"'\\]+\/|\/home\/[^/\s:"'\\]+\/|[a-zA-Z]:\\Users\\[^\\\s:"']+\\)/,
     description: "Absolute home path that path rewriting did not remove",
   },
 ];
@@ -249,3 +281,24 @@ function normalizeRoot(root: string): string {
   }
   return root;
 }
+
+/**
+ * Strip a `user:password@` block out of every URL in `text`, keeping the rest of
+ * the URL readable. Used on values that are published but are not transcript
+ * text - a git remote, most importantly - where dropping the whole string would
+ * lose the one fact the reader needs (which repo this was).
+ */
+export function stripUrlCredentials(text: string): string {
+  // Requires an actual `:password` part. A bare `user@host` is a username, not
+  // a credential - `ssh://git@github.com/org/repo.git` is the single most common
+  // remote there is, and rewriting it would destroy the one fact the reader
+  // needs. A username that IS a token (`https://ghp_.../@github.com`) is caught
+  // by the vendor-prefix rules instead, which fire wherever the token appears.
+  return text.replace(
+    /\b([a-z][a-z0-9+.-]*:\/\/)[^/\s:@]+:[^/\s@]*@/gi,
+    (_match, scheme: string) => `${scheme}${CREDENTIAL_PLACEHOLDER}@`,
+  );
+}
+
+/** What replaces a stripped `user:pass` pair, so the removal is visible. */
+const CREDENTIAL_PLACEHOLDER = "${CREDENTIALS_REMOVED}";

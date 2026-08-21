@@ -9,7 +9,7 @@
  * Import-clean: nothing here reaches into src/core/ or src/adapters/.
  */
 
-import { mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { extname, join, posix } from "node:path";
 import {
   ENCLAVE_ALLOWED_EXTENSIONS,
@@ -29,13 +29,23 @@ export interface BundleFiles {
 /** Names enclave always skips when walking a push directory. */
 const SKIPPED_DIRS = new Set(["node_modules", ".git"]);
 
+/** Where `push` records the print-once share url. Never part of a bundle. */
+export const SHARE_URL_FILE = "SHARE-URL.txt";
+
 /** Write every bundle file into `dir`, creating it (and parents) if missing. */
 export function writeBundle(dir: string, files: BundleFiles): void {
   mkdirSync(dir, { recursive: true });
+  // A share url from a previous push must not survive into the next bundle.
+  // enclave would upload it as an ordinary .txt file, so the new artifact would
+  // serve the old link - widening the exposure of a link the sender believes is
+  // separately scoped. Nothing else in the pipeline would catch it: `.txt` is an
+  // allowed extension and no scanner rule matches an enclave share url.
+  rmSync(join(dir, SHARE_URL_FILE), { force: true });
   for (const name of Object.keys(files) as Array<keyof BundleFiles>) {
     writeFileSync(join(dir, name), files[name], "utf8");
   }
 }
+
 
 interface WalkedFile {
   /** Bundle-relative path, always with forward slashes. */

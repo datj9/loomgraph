@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { writeBundle, checkEnclaveConstraints, type BundleFiles } from "./bundle.js";
+import { writeBundle, checkEnclaveConstraints, SHARE_URL_FILE, type BundleFiles } from "./bundle.js";
 import { ENCLAVE_MAX_FILES, ENCLAVE_MAX_FILE_BYTES, ENCLAVE_MAX_TOTAL_BYTES } from "./types.js";
 
 function makeFiles(): BundleFiles {
@@ -133,5 +133,22 @@ describe("checkEnclaveConstraints", () => {
     const v = checkEnclaveConstraints(join(dir, "does-not-exist"));
     expect(v).toHaveLength(1);
     expect(v[0]).toContain("cannot read bundle directory");
+  });
+});
+
+describe("writeBundle purges a stale share url", () => {
+  let dir: string;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "lg-share-")); });
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+  it("removes SHARE-URL.txt so a re-pack cannot republish the old link", () => {
+    writeBundle(dir, makeFiles());
+    writeFileSync(join(dir, SHARE_URL_FILE), "https://host/s/OLDTOKEN\n", "utf8");
+    // A second pack into the same --out directory.
+    writeBundle(dir, makeFiles());
+    expect(existsSync(join(dir, SHARE_URL_FILE))).toBe(false);
+    // Nothing else would have caught it: .txt is an allowed extension, so the
+    // stale link would have been uploaded alongside the new artifact.
+    expect(checkEnclaveConstraints(dir)).toEqual([]);
   });
 });
