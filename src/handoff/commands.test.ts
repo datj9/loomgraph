@@ -2,14 +2,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import {
-  packCommand,
-  pushCommand,
-  scanCommand,
-  SHARE_URL_FILE,
-  type Exec,
-} from "./commands.js";
-import { writeBundle } from "./bundle.js";
+import { packCommand, pushCommand, scanCommand, type Exec } from "./commands.js";
+import { SHARE_URL_FILE, writeBundle } from "./bundle.js";
 
 // Every spawn in these tests goes through this fake. No test may execute
 // claude, codex, opencode, enclave or git (AGENTS.md), so a test that asserts
@@ -388,6 +382,37 @@ describe("packCommand", () => {
 
     // Only git was spawned; packing never touches enclave.
     expect(new Set(fake.calls.map((c) => c.bin))).toEqual(new Set(["git"]));
+  });
+
+  it("strips credentials out of a remote url before publishing it", async () => {
+    // A remote is published verbatim in the brief and never passes through
+    // redactSession, so it is the one field that could carry a live token into
+    // a shared artifact with nothing else in the pipeline to stop it.
+    const work = tempDir();
+    const sessionFile = join(work, "session.jsonl");
+    writeFileSync(sessionFile, CLAUDE_JSONL, "utf8");
+    const out = join(work, "bundle");
+    const token = "glpat" + "-FAKEfake0000FAKEfake";
+    const fake = fakeExec((call) => {
+      if (call.bin !== "git") return { exitCode: 1 };
+      if (call.args[1] === "get-url") {
+        return { stdout: `https://oauth2:${token}@gitlab.com/acme/demo.git` };
+      }
+      if (call.args.includes("--abbrev-ref")) return { stdout: "feat/handoff" };
+      return { stdout: "a".repeat(40) };
+    });
+    const { log, lines } = collector();
+
+    const code = await packCommand({ adapter: "claude", cwd: work, sessionFile, out }, fake.exec, log);
+
+    expect(code).toBe(0);
+    expect(lines).toContain("warning: credentials stripped out of the git remote url");
+    const meta = JSON.parse(readFileSync(join(out, "meta.json"), "utf8"));
+    expect(meta.repo.remote).toBe("https://${CREDENTIALS_REMOVED}@gitlab.com/acme/demo.git");
+    // The token must not survive anywhere in the bundle.
+    for (const f of ["meta.json", "handoff.md", "index.html", "files.txt"]) {
+      expect(readFileSync(join(out, f), "utf8")).not.toContain(token);
+    }
   });
 
   it("records null repo fields and warns when git fails", async () => {

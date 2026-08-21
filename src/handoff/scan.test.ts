@@ -9,7 +9,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { SCAN_RULES, rewritePaths, scanBundleDir, scanText } from "./scan.js";
+import { SCAN_RULES, rewritePaths, scanBundleDir, scanText, stripUrlCredentials } from "./scan.js";
 
 function rules(text: string): string[] {
   return scanText(text, "f.md").map((f) => f.rule);
@@ -52,6 +52,11 @@ describe("SCAN_RULES", () => {
       "jwt",
       "private-key",
       "env-assignment",
+      "url-credentials",
+      "stripe-key",
+      "gitlab-token",
+      "npm-token",
+      "sendgrid-key",
       "abs-home-path",
     ]);
   });
@@ -104,6 +109,54 @@ describe("scanText — hits and near-misses per rule", () => {
     expect(fires("the blob starts with eyJ and is not a token", "jwt")).toBe(false);
     expect(fires("eyJhbGciOiJIUzI1NiJ9", "jwt")).toBe(false);
     expect(fires("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJmYWtlIn0", "jwt")).toBe(false);
+  });
+
+  it("url-credentials", () => {
+    // The shape that leaks a credential-bearing git remote into a brief.
+    expect(
+      fires(`- remote: https://oauth2:${shaped("glpat", "-FAKEfake0000FAKEfake")}@gitlab.com/o/r.git`, "url-credentials"),
+    ).toBe(true);
+    expect(fires("postgres://admin:hunter2@db.internal:5432/app", "url-credentials")).toBe(true);
+    // A url with no credentials, and a bare user@host with no password.
+    expect(fires("https://github.com/datj9/loomgraph.git", "url-credentials")).toBe(false);
+    expect(fires("git@github.com:datj9/loomgraph.git", "url-credentials")).toBe(false);
+  });
+
+  it("stripe-key", () => {
+    expect(fires(shaped("sk_live", "_FAKEfake0000FAKEfake0000"), "stripe-key")).toBe(true);
+    expect(fires(shaped("sk_test", "_FAKEfake0000FAKEfake0000"), "stripe-key")).toBe(true);
+    // The hyphen rule must not claim it, and a short tail must not fire.
+    expect(fires(shaped("sk_live", "_FAKEfake0000FAKEfake0000"), "generic-sk-key")).toBe(false);
+    expect(fires("sk_live_short", "stripe-key")).toBe(false);
+  });
+
+  it("gitlab-token", () => {
+    expect(fires(shaped("glpat", "-FAKEfake0000FAKEfake"), "gitlab-token")).toBe(true);
+    expect(fires("glpat-short", "gitlab-token")).toBe(false);
+  });
+
+  it("npm-token", () => {
+    expect(fires(shaped("npm", "_FAKEfake0000FAKEfake0000FAKEfake0000"), "npm-token")).toBe(true);
+    expect(fires("npm_install is not a token", "npm-token")).toBe(false);
+  });
+
+  it("sendgrid-key", () => {
+    expect(fires(shaped("SG", ".FAKEfake0000FAKE.FAKEfake0000FAKEfake"), "sendgrid-key")).toBe(true);
+    expect(fires("SG.short.tail", "sendgrid-key")).toBe(false);
+  });
+
+  it("env-assignment is case-insensitive and covers a json key", () => {
+    expect(fires("database_password=hunter2xyz", "env-assignment")).toBe(true);
+    expect(fires('"password": "hunter2xyz"', "env-assignment")).toBe(true);
+    expect(fires("MY_SERVICE_TOKEN=fake-not-real", "env-assignment")).toBe(true);
+    // Placeholders are not secrets.
+    expect(fires("MY_SERVICE_TOKEN=", "env-assignment")).toBe(false);
+    expect(fires('MY_SERVICE_TOKEN=""', "env-assignment")).toBe(false);
+  });
+
+  it("abs-home-path accepts a lower-case windows drive letter", () => {
+    expect(fires("c:\\Users\\someone\\notes.md", "abs-home-path")).toBe(true);
+    expect(fires("C:\\Users\\someone\\notes.md", "abs-home-path")).toBe(true);
   });
 
   it("private-key", () => {
@@ -287,5 +340,35 @@ describe("scanBundleDir", () => {
     writeFileSync(file, shaped("AKIA", "FAKEFAKEFAKE0000"), "utf8");
     expect(scanBundleDir(join(dir, "does-not-exist"))).toEqual([]);
     expect(scanBundleDir(file)).toEqual([]);
+  });
+});
+
+describe("stripUrlCredentials", () => {
+  it("removes a user:password pair but keeps the repo identifiable", () => {
+    const out = stripUrlCredentials(
+      `https://oauth2:${shaped("glpat", "-FAKEfake0000FAKEfake")}@gitlab.com/org/repo.git`,
+    );
+    expect(out).toBe("https://${CREDENTIALS_REMOVED}@gitlab.com/org/repo.git");
+    expect(scanText(out, "meta.json")).toEqual([]);
+  });
+
+  it("leaves a credential-free url untouched", () => {
+    for (const url of [
+      "https://github.com/datj9/loomgraph.git",
+      "git@github.com:datj9/loomgraph.git",
+      "ssh://git@host:22/org/repo.git",
+    ]) {
+      expect(stripUrlCredentials(url)).toBe(url);
+    }
+  });
+
+  it("leaves a bare user@host alone - a username is not a credential", () => {
+    // ssh://git@host is the commonest remote there is; mangling it would lose
+    // the only fact the reader needs. A token used AS the username is caught by
+    // the vendor rules instead.
+    expect(stripUrlCredentials("https://alice@host/repo.git")).toBe("https://alice@host/repo.git");
+    const tokenAsUser = `https://${shaped("ghp", "_FAKEfake0000FAKEfake0000")}@github.com/o/r.git`;
+    expect(stripUrlCredentials(tokenAsUser)).toBe(tokenAsUser);
+    expect(scanText(tokenAsUser, "meta.json").map((f) => f.rule)).toContain("github-token");
   });
 });

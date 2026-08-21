@@ -6,3 +6,8 @@ dist/
 .claude/
 .hermes/
 .devkit/
+
+# lg-handoff output: a distilled transcript and a print-once share url.
+# Never commit either - the share url grants read access to the artifact.
+handoff-bundle/
+SHARE-URL.txt

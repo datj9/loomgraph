@@ -286,11 +286,20 @@ lg-handoff push ./handoff-bundle --expires 7d
 ```
 
 A bundle is four files: `index.html` (the page enclave serves), `handoff.md`, `meta.json`
-and `files.txt`. `push` refuses to invoke `enclave` at all if the scanner finds anything or
+and `files.txt`. `handoff-bundle/` and `SHARE-URL.txt` are gitignored: a share url grants
+read access to the artifact, so committing one is worse than losing it. `push` refuses to invoke `enclave` at all if the scanner finds anything or
 if the bundle breaks enclave's published limits, so a bad bundle fails locally with the
 limit named rather than as an opaque server refusal. On success the share url is printed
 and written to `<bundleDir>/SHARE-URL.txt`, because enclave prints it once and keeps only
 its hash: lose the line and the link is unrecoverable.
+
+The scanner covers URL-embedded credentials (`scheme://user:pass@host`), Anthropic,
+OpenAI, Stripe, GitHub, GitLab, Slack, AWS, GCP, npm and SendGrid key shapes, JWTs, PEM
+private keys, and token/secret/password assignments. It is an allowlist of shapes, not a
+proof: a credential in a shape it does not know still gets through, so `--dry-run` and
+reading the brief before you share the link are both still worth doing. The git remote is
+special-cased - it is published verbatim and never passes through path rewriting, so any
+`user:password@` in it is stripped at the source.
 
 Two honest caveats. The distillation is mechanical and extractive - it quotes your turns
 under fixed headings, it does not summarise, and the brief says so in a banner. And

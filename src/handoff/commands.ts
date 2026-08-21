@@ -16,7 +16,7 @@
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { join, resolve } from "node:path";
-import { checkEnclaveConstraints, writeBundle } from "./bundle.js";
+import { SHARE_URL_FILE, checkEnclaveConstraints, writeBundle } from "./bundle.js";
 import {
   buildEnclavePushArgs,
   buildEnclaveShareCreateArgs,
@@ -27,7 +27,7 @@ import { parseClaudeSessionJsonl, encodeClaudeProjectDir } from "./readers/claud
 import { parseCodexSessionJsonl } from "./readers/codex.js";
 import { buildOpencodeExportArgs, parseOpencodeExportJson } from "./readers/opencode.js";
 import { renderFilesTxt, renderHandoffHtml, renderHandoffMd } from "./render.js";
-import { rewritePaths, scanBundleDir } from "./scan.js";
+import { rewritePaths, scanBundleDir, stripUrlCredentials } from "./scan.js";
 import type { DistilledSession, HandoffAdapter, HandoffMeta, ScanFinding } from "./types.js";
 
 /** The single spawn seam. Shaped after the subset of execa's result we use. */
@@ -58,9 +58,6 @@ export interface PushOptions {
   dryRun: boolean;
   visibility: string;
 }
-
-/** Name of the file `push` writes the print-once share URL into. */
-export const SHARE_URL_FILE = "SHARE-URL.txt";
 
 /**
  * Pack a transcript into a publishable bundle.
@@ -402,7 +399,14 @@ async function gatherRepoFacts(
     gitField(cwd, ["rev-parse", "HEAD"], exec, log, "sha"),
     gitField(cwd, ["rev-parse", "--abbrev-ref", "HEAD"], exec, log, "branch"),
   ]);
-  return { remote, sha, branch };
+  // A remote can carry credentials (https://oauth2:<token>@host/repo.git). It is
+  // published verbatim in the brief, and unlike transcript text it never passes
+  // through redactSession, so it is stripped here at the source.
+  const safeRemote = remote === null ? null : stripUrlCredentials(remote);
+  if (safeRemote !== remote) {
+    log("warning: credentials stripped out of the git remote url");
+  }
+  return { remote: safeRemote, sha, branch };
 }
 
 async function gitField(
