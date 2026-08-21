@@ -261,6 +261,59 @@ Both agent adapters close stdin before spawning. Codex otherwise prints `Reading
 
 Exit codes: `0` success, `1` validation or usage error, `2` run failed, `3` budget exceeded, `4` paused awaiting a human.
 
+## Handoff
+
+`lg-handoff` is a second binary. It distils one `claude`, `codex` or `opencode` session
+into a self-contained brief, scans that brief for secrets, and publishes it privately with
+the `enclave` cli behind a time-boxed share link. It is how you hand a colleague enough
+context to continue your work without handing them your transcript.
+
+It is not a subcommand of `lg`, shares no state with a run, and is not a daemon.
+
+| Command | What it does |
+| --- | --- |
+| `lg-handoff pack <claude\|codex\|opencode> [sessionRef] [--cwd dir] [--session-file path] [--out dir] [--title t]` | Distil a session into a bundle at `--out` (default `./handoff-bundle`) |
+| `lg-handoff scan <bundleDir>` | Report secrets and residual absolute paths, with masked excerpts |
+| `lg-handoff push <bundleDir> [--title t] [--expires 7d] [--dry-run]` | Scan, check the enclave limits, publish privately, mint a share link |
+
+Exit codes for this bin: `0` success, `1` usage or file not found, `2` scan findings or
+push refused. They are its own namespace, deliberately not `lg`'s.
+
+```bash
+lg-handoff pack claude --cwd . --title "auth refactor, where I got to"
+lg-handoff scan ./handoff-bundle
+lg-handoff push ./handoff-bundle --expires 7d
+```
+
+A bundle is four files: `index.html` (the page enclave serves), `handoff.md`, `meta.json`
+and `files.txt`. `push` refuses to invoke `enclave` at all if the scanner finds anything or
+if the bundle breaks enclave's published limits, so a bad bundle fails locally with the
+limit named rather than as an opaque server refusal. On success the share url is printed
+and written to `<bundleDir>/SHARE-URL.txt`, because enclave prints it once and keeps only
+its hash: lose the line and the link is unrecoverable.
+
+Two honest caveats. The distillation is mechanical and extractive - it quotes your turns
+under fixed headings, it does not summarise, and the brief says so in a banner. And
+discovering a transcript relies on an undocumented, version-dependent directory encoding,
+so `pack` always prints which file it chose and `--session-file` is there to override a
+wrong pick. Separately, the `enclave share create --json` parser is deliberately lenient
+because that stdout shape has not yet been captured from a real invocation.
+
+### What handoff is not
+
+- **No `pull`.** `enclave` has no fetch subcommand, and a share url is print-once. The
+  recipient opens the link; the brief *is* the page.
+- **No raw transcript upload.** enclave allows 13 file extensions, `.jsonl` is not among
+  them, and files are capped at 2 MB - a real session transcript is larger. Distilled is
+  not a compromise here, it is the only thing that fits.
+- **No cross-CLI replay and no session transplant.** Nothing writes into another person's
+  home directory, and no adapter resumes someone else's session id.
+- **`private` visibility only.** A transcript is production data. `--visibility org` and
+  `public` are refused.
+- **No signal bus, inbox, or daemon.** That would contradict "Not a workflow server"
+  above, and an inbox that starts an agent on someone else's laptop is a different product
+  with a much harder threat model.
+
 ## What this is not
 
 - **Not a model, and not an SDK for one.** loomgraph makes zero API calls of its own and has no LLM SDK dependency.
