@@ -197,20 +197,27 @@ function walk(dir: string, prefix: string, out: string[]): void {
  * Walk `dir` recursively and scan every text file, reporting bundle-relative
  * paths with forward slashes. The only filesystem toucher in this module.
  *
- * Unreadable files are skipped rather than thrown on: a scan that dies halfway
- * reports fewer secrets than a scan that finishes.
+ * Anything this function cannot read becomes a finding rather than a skip. That
+ * matters: every caller treats an empty result as "clean, safe to publish", so a
+ * file skipped because it was unreadable would report exactly the same as a file
+ * that was read and found innocent. A gate that cannot look must not answer
+ * "clean" - it fails closed instead.
  */
 export function scanBundleDir(dir: string): ScanFinding[] {
   let stats;
   try {
     stats = statSync(dir);
-  } catch {
-    return [];
+  } catch (err: unknown) {
+    return [unreadable(".", `bundle directory cannot be read: ${reason(err)}`)];
   }
-  if (!stats.isDirectory()) return [];
+  if (!stats.isDirectory()) return [unreadable(".", "bundle path is not a directory")];
 
   const rels: string[] = [];
-  walk(dir, "", rels);
+  try {
+    walk(dir, "", rels);
+  } catch (err: unknown) {
+    return [unreadable(".", `bundle directory cannot be listed: ${reason(err)}`)];
+  }
   rels.sort();
 
   const findings: ScanFinding[] = [];
@@ -218,12 +225,24 @@ export function scanBundleDir(dir: string): ScanFinding[] {
     let text: string;
     try {
       text = readFileSync(join(dir, ...rel.split("/")), "utf8");
-    } catch {
+    } catch (err: unknown) {
+      findings.push(unreadable(rel, `file cannot be read, so it was never scanned: ${reason(err)}`));
       continue;
     }
     findings.push(...scanText(text, rel));
   }
   return findings;
+}
+
+/** Rule name reported when the scanner could not read what it was asked to scan. */
+export const UNREADABLE_RULE = "unreadable-file";
+
+function unreadable(file: string, detail: string): ScanFinding {
+  return { rule: UNREADABLE_RULE, file, line: 0, excerpt: detail };
+}
+
+function reason(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 /** Literal (non-regex) replacement of every occurrence of `needle`. */

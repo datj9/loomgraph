@@ -37,7 +37,7 @@ export interface ScanFinding {
   rule: string;
   /** Bundle-relative path. */
   file: string;
-  /** 1-based. */
+  /** 1-based. `0` means the finding is about the file itself, not a line in it. */
   line: number;
   /** Masked. A finding must never reproduce the secret it found. */
   excerpt: string;

@@ -119,7 +119,15 @@ export async function packCommand(
 
 /** Scan an existing bundle. 2 if anything was found, else 0. */
 export async function scanCommand(dir: string, log: (s: string) => void): Promise<number> {
-  const findings = scanBundleDir(resolve(dir));
+  const target = resolve(dir);
+  // A typo'd path must not read as "scan clean". Reported as a usage error
+  // rather than a finding, so "cannot find it" and "found something in it" stay
+  // distinguishable at the exit code.
+  if (!existsSync(target)) {
+    log(`no such bundle directory: ${target}`);
+    return 1;
+  }
+  const findings = scanBundleDir(target);
   if (findings.length > 0) {
     printFindings(findings, log);
     return 2;

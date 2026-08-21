@@ -274,7 +274,7 @@ It is not a subcommand of `lg`, shares no state with a run, and is not a daemon.
 | --- | --- |
 | `lg-handoff pack <claude\|codex\|opencode> [sessionRef] [--cwd dir] [--session-file path] [--out dir] [--title t]` | Distil a session into a bundle at `--out` (default `./handoff-bundle`) |
 | `lg-handoff scan <bundleDir>` | Report secrets and residual absolute paths, with masked excerpts |
-| `lg-handoff push <bundleDir> [--title t] [--expires 7d] [--dry-run]` | Scan, check the enclave limits, publish privately, mint a share link |
+| `lg-handoff push <bundleDir> [--title t] [--expires 7d] [--visibility private] [--dry-run]` | Scan, check the enclave limits, publish privately, mint a share link |
 
 Exit codes for this bin: `0` success, `1` usage or file not found, `2` scan findings or
 push refused. They are its own namespace, deliberately not `lg`'s.

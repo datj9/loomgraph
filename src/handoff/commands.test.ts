@@ -313,6 +313,16 @@ describe("scanCommand", () => {
     expect(lines).toContain("scan clean");
   });
 
+  it("returns 1 for a bundle directory that does not exist, not 0", async () => {
+    // "scan clean" on a typo'd path is the worst possible answer: the user reads
+    // it as "verified safe" when nothing was scanned at all.
+    const { log, lines } = collector();
+    const missing = join(tempDir(), "nope");
+    expect(await scanCommand(missing, log)).toBe(1);
+    expect(lines.some((l) => l.includes("no such bundle directory"))).toBe(true);
+    expect(lines).not.toContain("scan clean");
+  });
+
   it("returns 2 and reports masked findings for a dirty bundle", async () => {
     const dir = tempDir();
     goodBundle(dir);
