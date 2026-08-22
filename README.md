@@ -263,50 +263,145 @@ Exit codes: `0` success, `1` validation or usage error, `2` run failed, `3` budg
 
 ## Handoff
 
-`lg-handoff` is a second binary. It distils one `claude`, `codex` or `opencode` session
-into a self-contained brief, scans that brief for secrets, and publishes it privately with
-the `enclave` cli behind a time-boxed share link. It is how you hand a colleague enough
-context to continue your work without handing them your transcript.
+You spent two hours in a `claude` session narrowing a bug. Now someone else has to carry
+it. `lg-handoff` turns that session into a short brief they can read in a minute - the
+goal, the files, what was claimed done, what is still open, and the exact commit to start
+from - then publishes it privately behind a link that expires.
 
-It is not a subcommand of `lg`, shares no state with a run, and is not a daemon.
+It hands over the *understanding*, not the transcript. A transcript is a credential dump;
+a brief is a handover note.
+
+```bash
+lg-handoff pack claude --title "LT-8451 null bank_code crash"   # -> ./handoff-bundle
+lg-handoff push ./handoff-bundle                                # -> prints a share link
+```
+
+Send the link. They open it in a browser and start a fresh session on the commit named in
+the brief. There is nothing to install on their side.
+
+### What the recipient actually sees
+
+The published page is this, rendered. Nothing was summarised by a model - every quote is
+lifted verbatim from a turn, and the banner says so:
+
+```markdown
+# LT-8451 null bank_code crash
+
+> This brief was distilled mechanically (quoted turns only - no model summarised it).
+> Verify every claim against the repo before acting on it.
+
+- adapter: claude          - created by: alice
+- session: 9f2c            - turns: 3
+- model: claude-opus-5
+
+## Goal
+> The loan submission crashes when bank_code is null. Find it and fix it.
+
+## Repo
+- remote: git@github.com:acme/api.git
+- sha: 6d4584dddf395e6fe7f93f63b70475de45d85a3d
+- branch: fix/LT-8451
+
+## Files
+- src/loan/disburse.ts
+- src/loan/submit.ts
+- tests/loan/submit.test.ts
+
+## Done
+Quoted from the last assistant turn. It is a claim, not a verified fact.
+> Found it. src/loan/submit.ts:88 dereferences bank_code before the null guard.
+> I added the guard and a regression test in tests/loan/submit.test.ts. Both pass.
+
+## Open
+> The same pattern probably exists in the disbursement path - check src/loan/disburse.ts next.
+```
+
+"It is a claim, not a verified fact" is deliberate. The tool cannot know whether the tests
+really passed, so it refuses to imply that it does.
+
+### Commands
 
 | Command | What it does |
 | --- | --- |
-| `lg-handoff pack <claude\|codex\|opencode> [sessionRef] [--cwd dir] [--session-file path] [--out dir] [--title t]` | Distil a session into a bundle at `--out` (default `./handoff-bundle`) |
+| `lg-handoff pack <claude\|codex\|opencode> [sessionRef]` | Distil a session into a bundle at `--out` (default `./handoff-bundle`) |
 | `lg-handoff scan <bundleDir>` | Report secrets and residual absolute paths, with masked excerpts |
-| `lg-handoff push <bundleDir> [--title t] [--expires 7d] [--visibility private] [--dry-run]` | Scan, check the enclave limits, publish privately, mint a share link |
+| `lg-handoff push <bundleDir>` | Scan, check the enclave limits, publish privately, mint a share link |
 
-Exit codes for this bin: `0` success, `1` usage or file not found, `2` scan findings or
-push refused. They are its own namespace, deliberately not `lg`'s.
+`pack` takes `--cwd <dir>` (the repo the session ran in, default `.`), `--session-file
+<path>`, `--out <dir>`, `--title <t>`.
+`push` takes `--title <t>`, `--expires <duration>` (default `7d`), `--visibility private`,
+`--dry-run`.
 
-```bash
-lg-handoff pack claude --cwd . --title "auth refactor, where I got to"
-lg-handoff scan ./handoff-bundle
-lg-handoff push ./handoff-bundle --expires 7d
-```
+`scan` runs automatically inside both `pack` and `push` - you only call it directly to
+re-check a bundle you edited by hand.
 
-A bundle is four files: `index.html` (the page enclave serves), `handoff.md`, `meta.json`
-and `files.txt`. `handoff-bundle/` and `SHARE-URL.txt` are gitignored: a share url grants
-read access to the artifact, so committing one is worse than losing it. `push` refuses to invoke `enclave` at all if the scanner finds anything or
-if the bundle breaks enclave's published limits, so a bad bundle fails locally with the
-limit named rather than as an opaque server refusal. On success the share url is printed
-and written to `<bundleDir>/SHARE-URL.txt`, because enclave prints it once and keeps only
-its hash: lose the line and the link is unrecoverable.
+### Exit codes, and what to do about each
 
-The scanner covers URL-embedded credentials (`scheme://user:pass@host`), Anthropic,
-OpenAI, Stripe, GitHub, GitLab, Slack, AWS, GCP, npm and SendGrid key shapes, JWTs, PEM
-private keys, and token/secret/password assignments. It is an allowlist of shapes, not a
-proof: a credential in a shape it does not know still gets through, so `--dry-run` and
-reading the brief before you share the link are both still worth doing. The git remote is
-special-cased - it is published verbatim and never passes through path rewriting, so any
-`user:password@` in it is stripped at the source.
+Its own namespace, deliberately not `lg`'s.
 
-Two honest caveats. The distillation is mechanical and extractive - it quotes your turns
-under fixed headings, it does not summarise, and the brief says so in a banner. And
-discovering a transcript relies on an undocumented, version-dependent directory encoding,
-so `pack` always prints which file it chose and `--session-file` is there to override a
-wrong pick. Separately, the `enclave share create --json` parser is deliberately lenient
-because that stdout shape has not yet been captured from a real invocation.
+| Code | Means | Do this |
+| --- | --- | --- |
+| `0` | Done | For `push`, save the printed link - see below |
+| `1` | Usage error, or the session/bundle was not found | Read the message; usually `--session-file` is the fix |
+| `2` | Secrets found, or the bundle broke an enclave limit | Fix what it names, then re-run. Nothing was uploaded |
+
+Exit `2` from `push` means `enclave` was **never invoked**. The refusal happens locally,
+before any network call, so a bundle that fails the scan cannot leak by accident.
+
+### The share link is printed once
+
+`enclave` prints a share url once and stores only its hash, so it cannot be recovered
+later. `push` therefore also writes it to `<bundleDir>/SHARE-URL.txt` the moment it gets
+it. Both `handoff-bundle/` and `SHARE-URL.txt` are gitignored - the link grants read
+access to the artifact, so committing one is worse than losing it.
+
+To hand over again later, `pack` and `push` again; you get a new link. To cut off access
+early, `enclave share revoke <shareId>`.
+
+### Picking the right session
+
+`--session-file <path>` always wins, and is the reliable option. Without it:
+
+- **claude** - most recent `*.jsonl` under `~/.claude/projects/<cwd with every
+  non-alphanumeric character replaced by ->`.
+- **codex** - most recent `*.jsonl` under `~/.codex/sessions/`, searched a few levels deep.
+- **opencode** - no file search; runs `opencode export [sessionRef] --sanitize` and reads
+  its stdout.
+
+That claude directory encoding is undocumented and changes between versions, so discovery
+is best-effort. `pack` always prints which file it chose and labels it as a guess. If the
+brief looks like the wrong conversation, that line is why - re-run with `--session-file`.
+
+### What gets stripped, and what does not
+
+Before rendering, every home path becomes `${HOME}`, the repo root becomes
+`${REPO_ROOT}`, and your username becomes `user`. Tool-result blobs, attachments,
+file-history snapshots, codex `base_instructions`, MCP config and permission modes are
+dropped by the readers and never reach the page at all.
+
+Then the scanner runs, and `push` refuses on any hit. It knows URL-embedded credentials
+(`scheme://user:pass@host`), Anthropic, OpenAI, Stripe, GitHub, GitLab, Slack, AWS, GCP,
+npm and SendGrid key shapes, JWTs, PEM private keys, and token/secret/password
+assignments. The git remote is special-cased: it is published verbatim and never passes
+through path rewriting, so a `user:password@` in it is stripped at the source.
+
+**This is an allowlist of shapes, not a proof.** A credential in a shape it has never seen
+goes straight through. Read the brief before you send the link - it is one screen, and you
+are the last check. If the scanner cannot read a file it was asked to scan, it reports
+that as a finding rather than staying quiet, so "clean" always means "looked at and found
+nothing".
+
+### Troubleshooting
+
+| You see | Cause | Fix |
+| --- | --- | --- |
+| `no claude session file found for <dir>` | No transcript at the encoded path - common if the CLI stores sessions elsewhere, e.g. under a wrapper | `--session-file <path>` |
+| `using discovered session file ... (discovery is best-effort)` and the brief looks wrong | Discovery picked the newest transcript, not the one you meant | `--session-file <path>` |
+| `opencode not found on PATH` | `pack opencode` shells out to the real binary | Install it, or `opencode export --sanitize > s.json` elsewhere and pass `--session-file s.json` |
+| `refusing to push: N scan finding(s)` | A secret shape in the brief | Fix the source, re-`pack`. Editing the bundle by hand works too - then `scan` it again |
+| `<file>: extension .jsonl is not in the enclave allowlist` | Something not in the four-file bundle landed in the directory | Remove it; `--out` should be a directory the tool owns |
+| `enclave not found on PATH` | Only `push` needs it | The bundle is still on disk; install `enclave` or hand the folder over another way |
+| `unreadable-file` finding | The scanner could not open a file, so it refuses to call the bundle clean | Fix permissions and re-scan |
 
 ### What handoff is not
 
@@ -317,11 +412,16 @@ because that stdout shape has not yet been captured from a real invocation.
   not a compromise here, it is the only thing that fits.
 - **No cross-CLI replay and no session transplant.** Nothing writes into another person's
   home directory, and no adapter resumes someone else's session id.
+- **No summarisation.** The distillation is extractive - it quotes turns under fixed
+  headings. There is no model call, so `pack` works offline and cannot invent a claim.
 - **`private` visibility only.** A transcript is production data. `--visibility org` and
   `public` are refused.
 - **No signal bus, inbox, or daemon.** That would contradict "Not a workflow server"
-  above, and an inbox that starts an agent on someone else's laptop is a different product
+  below, and an inbox that starts an agent on someone else's laptop is a different product
   with a much harder threat model.
+
+Known rough edge: the `enclave share create --json` parser accepts several plausible field
+names because that stdout shape has not yet been captured from a real invocation.
 
 ## What this is not
 

@@ -44,6 +44,27 @@ owns its own enclave helpers so it stays extractable into a sibling package with
 That is why `buildEnclavePushArgs` exists twice and neither copy should be deduplicated
 into a shared module.
 
+Inside `src/handoff/`, one file per job, and the data flows one way:
+
+```
+readers/*.ts  transcript text  -> DistilledSession   pure; the narrowing boundary
+scan.ts       text             -> ScanFinding[]      pure; also rewritePaths
+render.ts     DistilledSession -> md / html / txt    pure; escapes everything
+bundle.ts     the 4 files      -> disk               + the enclave limit check
+enclave.ts    argv builders and stdout parsers       pure
+commands.ts   pack / scan / push                     the only place that spawns
+cli.ts        commander wiring                       the only place that reads argv
+```
+
+Two rules that are the point of the subtree, not incidental:
+
+- **The readers drop, they do not carry.** Tool results, attachments, file-history
+  snapshots, codex `base_instructions` and permission modes must never reach a
+  `DistilledSession`. Adding a field to that type means deciding it is safe to publish.
+- **The gates fail closed.** Anything the scanner cannot read becomes a finding, not a
+  skip - an empty result means "safe to publish" to every caller. If you add a path
+  where scanning can be skipped, `push` must refuse rather than proceed.
+
 Pure functions (`readySet`, `interpolate`, `planLevels`, `renderStatus`, `checkBudget`, every parser) are exported so they can be unit-tested directly. Keep them pure.
 
 ## Forbidden paths
