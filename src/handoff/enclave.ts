@@ -46,6 +46,19 @@ export function buildEnclaveShareCreateArgs(artifactId: string, expires: string)
   return ["share", "create", artifactId, "--expires", expires, "--json"];
 }
 
+/**
+ * Shapes `enclave share create --expires` accepts. Anything else is an
+ * InvalidInputError after the artifact is already published, so push must
+ * reject these locally first.
+ */
+export function isValidExpires(value: string): boolean {
+  if (/^\d+[dhw]$/.test(value)) return true;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return true;
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value)) return true;
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:\d{2})$/.test(value)) return true;
+  return false;
+}
+
 export type EnclaveShareResult = { ok: true; url: string } | { ok: false; error: string };
 
 /**
