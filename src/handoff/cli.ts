@@ -136,10 +136,10 @@ program
     "after",
     `
   Refuses locally - before enclave is invoked at all - if the scanner finds
-  anything, the bundle breaks an enclave limit, or --expires is not a duration
-  / date / date-time / zoned ISO instant. Exit 2 at that local gate means
-  nothing was uploaded. Exit 2 after enclave ran can mean a partial publish;
-  see stderr. Use --dry-run to let enclave validate without publishing.
+  anything or the bundle breaks an enclave limit (exit 2, nothing uploaded),
+  or if --expires is not a duration / date / date-time / zoned ISO instant
+  (exit 1). Exit 2 after enclave ran can mean a partial publish; see stderr.
+  Use --dry-run to let enclave validate without publishing.
 `,
   )
   .action((bundleDir: string, opts) =>

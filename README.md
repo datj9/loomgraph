@@ -342,13 +342,13 @@ Its own namespace, deliberately not `lg`'s.
 | Code | Means | Do this |
 | --- | --- | --- |
 | `0` | Done | For `push`, save the printed link - see below |
-| `1` | Usage error, or the session/bundle was not found | Read the message; usually `--session-file` is the fix |
+| `1` | Usage error, session/bundle not found, or `--expires` is not a duration/date | Read the message; usually `--session-file` or a valid `--expires` |
 | `2` | Secrets found, an enclave limit broke, or a remote enclave step failed | Read stderr. A local-gate 2 means nothing was uploaded. A 2 after enclave ran can mean the artifact is already published - the view url is on stdout |
 
-Exit 2 at a local gate (scan findings, enclave constraint, or invalid `--expires`)
-means enclave was never invoked. Exit 2 after that means see stderr; a partial
-publish is possible. Missing enclave on PATH is exit 1 and also prints the view
-url when the artifact is already up.
+Exit 2 at a local gate (scan findings or an enclave constraint) means enclave
+was never invoked. Exit 2 after that means see stderr; a partial publish is
+possible. Invalid `--expires` and a missing enclave binary are exit 1; the
+latter also prints the view url when the artifact is already up.
 
 ### The share link is printed once
 
