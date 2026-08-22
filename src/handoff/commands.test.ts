@@ -256,6 +256,23 @@ describe("pushCommand", () => {
     expect(lines.some((l) => l.includes("production data"))).toBe(true);
   });
 
+  it("refuses an invalid --expires before invoking enclave", async () => {
+    const dir = tempDir();
+    goodBundle(dir);
+    const { log, lines } = collector();
+
+    const code = await pushCommand(
+      dir,
+      { expires: "forever", dryRun: false, visibility: "private" },
+      forbiddenExec.exec,
+      log,
+    );
+
+    expect(code).toBe(1);
+    expect(forbiddenExec.calls).toEqual([]);
+    expect(lines.some((l) => l.includes("invalid --expires"))).toBe(true);
+  });
+
   it("stops after push on --dry-run and never creates a share", async () => {
     const dir = tempDir();
     goodBundle(dir);

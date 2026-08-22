@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildEnclavePushArgs,
   buildEnclaveShareCreateArgs,
+  isValidExpires,
   parseEnclavePushJson,
   parseEnclaveShareCreateJson,
 } from "./enclave.js";
@@ -83,6 +84,29 @@ describe("buildEnclaveShareCreateArgs", () => {
       "7d",
       "--json",
     ]);
+  });
+});
+
+describe("isValidExpires", () => {
+  it("accepts the shapes enclave documents", () => {
+    for (const value of [
+      "7d",
+      "12h",
+      "2w",
+      "30d",
+      "2026-08-10",
+      "2026-08-10T14:30",
+      "2026-08-10T23:59:00Z",
+      "2026-08-10T23:59:00+07:00",
+    ]) {
+      expect(isValidExpires(value)).toBe(true);
+    }
+  });
+
+  it("rejects shapes enclave would refuse after publish", () => {
+    for (const value of ["forever", "", "tomorrow", "7", "7days", "abc"]) {
+      expect(isValidExpires(value)).toBe(false);
+    }
   });
 });
 

@@ -20,6 +20,7 @@ import { SHARE_URL_FILE, checkEnclaveConstraints, writeBundle } from "./bundle.j
 import {
   buildEnclavePushArgs,
   buildEnclaveShareCreateArgs,
+  isValidExpires,
   parseEnclavePushJson,
   parseEnclaveShareCreateJson,
 } from "./enclave.js";
@@ -155,6 +156,14 @@ export async function pushCommand(
     log(
       `refusing --visibility ${opts.visibility}: a handoff bundle quotes a real ` +
         "session, which is production data. Only private is allowed.",
+    );
+    return 1;
+  }
+
+  if (!isValidExpires(opts.expires)) {
+    log(
+      `invalid --expires ${opts.expires}: expected a duration like 7d/12h/2w, ` +
+        "a date, a date-time, or a zoned ISO instant",
     );
     return 1;
   }
