@@ -273,7 +273,33 @@ describe("rewritePaths", () => {
       username: "dat",
       repoRoot: "/Users/dat/app",
     });
-    expect(out).toBe("author user pushed from user-laptop");
+    expect(out).toBe("author user pushed from dat-laptop");
+  });
+
+  it("does not rewrite the username inside ordinary words", () => {
+    const input = "the dataset in /srv/data was validated; datadog alerts fired";
+    const out = rewritePaths(input, {
+      home: "/Users/dat",
+      username: "dat",
+      repoRoot: "/Users/dat/app",
+    });
+    expect(out).toBe(input);
+    expect(out).toContain("dataset");
+    expect(out).toContain("datadog");
+    expect(out).not.toContain("useraset");
+    expect(out).not.toContain("useradog");
+  });
+
+  it("does not rewrite a short username inside identifiers", () => {
+    const input = "ec2 instance ready, second attempt";
+    const out = rewritePaths(input, {
+      home: "/home/ec",
+      username: "ec",
+      repoRoot: "/opt/app",
+    });
+    expect(out).toBe(input);
+    expect(out).toContain("ec2");
+    expect(out).toContain("second");
   });
 
   it("tolerates trailing separators and empty roots", () => {
