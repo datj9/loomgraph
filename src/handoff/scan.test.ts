@@ -57,6 +57,9 @@ describe("SCAN_RULES", () => {
       "gitlab-token",
       "npm-token",
       "sendgrid-key",
+      "huggingface-token",
+      "google-oauth-secret",
+      "auth-header",
       "abs-home-path",
     ]);
   });
@@ -125,9 +128,12 @@ describe("scanText — hits and near-misses per rule", () => {
   it("stripe-key", () => {
     expect(fires(shaped("sk_live", "_FAKEfake0000FAKEfake0000"), "stripe-key")).toBe(true);
     expect(fires(shaped("sk_test", "_FAKEfake0000FAKEfake0000"), "stripe-key")).toBe(true);
+    expect(fires(shaped("rk_live", "_FAKEfake0000FAKEfake0000"), "stripe-key")).toBe(true);
+    expect(fires(shaped("rk_test", "_FAKEfake0000FAKEfake0000"), "stripe-key")).toBe(true);
     // The hyphen rule must not claim it, and a short tail must not fire.
     expect(fires(shaped("sk_live", "_FAKEfake0000FAKEfake0000"), "generic-sk-key")).toBe(false);
-    expect(fires("sk_live_short", "stripe-key")).toBe(false);
+    expect(fires("«redacted:sk_live_…»", "stripe-key")).toBe(false);
+    expect(fires("rk_live_x is too short", "stripe-key")).toBe(false);
   });
 
   it("gitlab-token", () => {
@@ -143,6 +149,22 @@ describe("scanText — hits and near-misses per rule", () => {
   it("sendgrid-key", () => {
     expect(fires(shaped("SG", ".FAKEfake0000FAKE.FAKEfake0000FAKEfake"), "sendgrid-key")).toBe(true);
     expect(fires("SG.short.tail", "sendgrid-key")).toBe(false);
+  });
+
+  it("huggingface-token", () => {
+    expect(fires(shaped("hf", "_FAKEfake0000FAKEfake"), "huggingface-token")).toBe(true);
+    expect(fires("hf_hub is a library name", "huggingface-token")).toBe(false);
+  });
+
+  it("google-oauth-secret", () => {
+    expect(fires(shaped("GOCSPX", "-FAKEfake0000FAKEfake"), "google-oauth-secret")).toBe(true);
+    expect(fires("GOCSPX-short", "google-oauth-secret")).toBe(false);
+  });
+
+  it("auth-header", () => {
+    expect(fires("Authorization: Bearer FAKESECRET_k4l5m6n7o8p9q0r1s2t3", "auth-header")).toBe(true);
+    expect(fires("authorization: Basic dXNlcjpwYXNz", "auth-header")).toBe(true);
+    expect(fires("Authorization: Bearer", "auth-header")).toBe(false);
   });
 
   it("env-assignment is case-insensitive and covers a json key", () => {
@@ -345,8 +367,10 @@ describe("scanBundleDir", () => {
     const dir = makeDir();
     writeFileSync(join(dir, "clean.md"), "A clean brief about the task-list.\n", "utf8");
     writeFileSync(join(dir, "dirty.md"), `line one\n${shaped("AKIA", "FAKEFAKEFAKE0000")}\n`, "utf8");
-    // Binary-ish extension: skipped even though the bytes look like a key.
+    // svg is text and on the enclave allowlist, so it must be scanned.
     writeFileSync(join(dir, "logo.svg"), shaped("AKIA", "FAKEFAKEFAKE0000"), "utf8");
+    // Binary extension: skipped even though the bytes look like a key.
+    writeFileSync(join(dir, "logo.png"), shaped("AKIA", "FAKEFAKEFAKE0000"));
     writeFileSync(join(dir, ".env"), "MY_SERVICE_TOKEN=fake-not-real", "utf8");
     mkdirSync(join(dir, "node_modules"));
     writeFileSync(join(dir, "node_modules", "dep.md"), shaped("AKIA", "FAKEFAKEFAKE0000"), "utf8");
@@ -356,6 +380,7 @@ describe("scanBundleDir", () => {
     const findings = scanBundleDir(dir);
     expect(findings).toEqual([
       { rule: "aws-access-key", file: "dirty.md", line: 2, excerpt: "AKIA..." },
+      { rule: "aws-access-key", file: "logo.svg", line: 1, excerpt: "AKIA..." },
       { rule: "github-token", file: "nested/deep.md", line: 1, excerpt: "ghp_..." },
     ]);
   });
