@@ -95,8 +95,9 @@ export const SCAN_RULES: ReadonlyArray<{
   {
     name: "stripe-key",
     // Underscore, not hyphen - so `generic-sk-key` cannot catch these.
-    pattern: /\bsk_(?:live|test)_[A-Za-z0-9]{16,}/,
-    description: "Stripe secret key",
+    // Restricted keys (rk_) are the same family; sk_live_ is already covered.
+    pattern: /\b[rs]k_(?:live|test)_[A-Za-z0-9]{16,}/,
+    description: "Stripe secret or restricted key",
   },
   {
     name: "gitlab-token",
@@ -114,6 +115,21 @@ export const SCAN_RULES: ReadonlyArray<{
     description: "SendGrid API key",
   },
   {
+    name: "huggingface-token",
+    pattern: /\bhf_[A-Za-z0-9]{16,}/,
+    description: "HuggingFace access token",
+  },
+  {
+    name: "google-oauth-secret",
+    pattern: /\bGOCSPX-[A-Za-z0-9_-]{16,}/,
+    description: "Google OAuth client secret",
+  },
+  {
+    name: "auth-header",
+    pattern: /\bAuthorization\s*:\s*(?:Bearer|Basic)\s+\S+/i,
+    description: "Authorization Bearer or Basic header",
+  },
+  {
     name: "abs-home-path",
     // Residual absolute home directory left after rewritePaths ran.
     pattern: /(?:\/Users\/[^/\s:"'\\]+\/|\/home\/[^/\s:"'\\]+\/|[a-zA-Z]:\\Users\\[^\\\s:"']+\\)/,
@@ -128,7 +144,6 @@ const BINARY_EXTENSIONS = new Set([
   ".jpeg",
   ".webp",
   ".woff2",
-  ".svg",
 ]);
 
 /** Directory names never walked by `scanBundleDir`. */
