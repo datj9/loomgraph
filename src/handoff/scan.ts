@@ -252,15 +252,27 @@ function replaceLiteral(text: string, needle: string, replacement: string): stri
 }
 
 /**
+ * Replace `username` only when it sits on a path or word boundary.
+ * An unanchored replace("dat","user") turns "dataset" into "useraset".
+ */
+function replaceUsernameToken(text: string, username: string): string {
+  if (username.length === 0) return text;
+  const escaped = username.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`(^|[/\\\\@:\\s"'])${escaped}(?=[/\\\\@:\\s"']|$)`, "g");
+  return text.replace(re, "$1user");
+}
+
+/**
  * Rewrite machine-specific absolute paths into placeholders.
  *
  * `repoRoot` is applied before `home` when it is the longer string, so a repo
  * inside the home directory becomes `${REPO_ROOT}/...` rather than
  * `${HOME}/projects/...`. The Linux and Windows home shapes for the same
  * username are rewritten too, because a transcript can quote a path from
- * another machine. Finally the bare username becomes `user`; that replacement
- * is intentionally unbounded (it also catches `dat-laptop`) since
- * over-redaction is the safe direction here.
+ * another machine. A standalone username token becomes `user`, but only at
+ * path / whitespace / quote / `@` / `:` boundaries so `dataset` and
+ * `dat-laptop` stay intact. Residual `/Users/<name>/` paths are still caught
+ * by the `abs-home-path` scan rule.
  */
 export function rewritePaths(
   text: string,
@@ -287,7 +299,7 @@ export function rewritePaths(
     ]) {
       out = replaceLiteral(out, shape, "${HOME}");
     }
-    out = replaceLiteral(out, opts.username, "user");
+    out = replaceUsernameToken(out, opts.username);
   }
 
   return out;
