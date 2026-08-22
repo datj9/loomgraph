@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { packCommand, pushCommand, scanCommand, type Exec } from "./commands.js";
@@ -150,6 +150,34 @@ describe("pushCommand", () => {
     expect(readFileSync(join(dir, SHARE_URL_FILE), "utf8")).toBe(
       "https://enclave.example/s/tok\n",
     );
+  });
+
+  it("scrubs a leftover SHARE-URL.txt before invoking enclave so a second push cannot republish it", async () => {
+    const dir = tempDir();
+    goodBundle(dir);
+    writeFileSync(join(dir, SHARE_URL_FILE), "https://enclave.example/s/OLDTOKEN\n", "utf8");
+    const fake = fakeExec((call) => {
+      if (call.args[0] === "push") {
+        expect(existsSync(join(dir, SHARE_URL_FILE))).toBe(false);
+        return { stdout: PUSH_JSON };
+      }
+      return { stdout: SHARE_JSON };
+    });
+    const { log } = collector();
+
+    const code = await pushCommand(
+      dir,
+      { expires: "7d", dryRun: false, visibility: "private" },
+      fake.exec,
+      log,
+    );
+
+    expect(code).toBe(0);
+    expect(fake.calls.map((c) => c.args[0])).toEqual(["push", "share"]);
+    expect(readFileSync(join(dir, SHARE_URL_FILE), "utf8")).toBe(
+      "https://enclave.example/s/tok\n",
+    );
+    expect(readFileSync(join(dir, SHARE_URL_FILE), "utf8")).not.toContain("OLDTOKEN");
   });
 
   it("prefers an explicit --title over the bundle's meta.json", async () => {
