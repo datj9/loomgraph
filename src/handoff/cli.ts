@@ -50,7 +50,31 @@ program
   .description(
     "Distil a claude/codex/opencode session into a self-contained brief, scan it " +
       "for secrets, and publish it privately with the enclave cli.\n\n" +
-      "Exit codes: 0 ok, 1 usage or not found, 2 scan findings or push refused.",
+      "Hands over the understanding, not the transcript: a brief a colleague reads " +
+      "in a minute, with the goal, the files, what was claimed done, what is open, " +
+      "and the commit to start from.",
+  )
+  .addHelpText(
+    "after",
+    `
+Typical run:
+  lg-handoff pack claude --title "LT-8451 null bank_code crash"   # -> ./handoff-bundle
+  lg-handoff push ./handoff-bundle                                # -> prints a share link
+
+  Send the link. The recipient opens it in a browser - nothing to install.
+
+Exit codes:
+  0  done
+  1  usage error, or the session / bundle was not found (usually: pass --session-file)
+  2  secrets found, or the bundle broke an enclave limit - NOTHING was uploaded
+
+Notes:
+  scan runs automatically inside both pack and push.
+  The share url is printed once and also written to <bundleDir>/SHARE-URL.txt;
+  enclave keeps only its hash, so it cannot be recovered later.
+  Discovery of a session file is best-effort - pack prints which file it chose.
+  The scanner is an allowlist of shapes, not a proof. Read the brief before sharing.
+`,
   );
 
 program
@@ -62,6 +86,15 @@ program
   .option("--out <dir>", "write the bundle here", "./handoff-bundle")
   .option("--title <t>", "title for the brief")
   .description("distil a session into a handoff bundle")
+  .addHelpText(
+    "after",
+    `
+  --session-file always wins and is the reliable option. Without it:
+    claude    newest *.jsonl under ~/.claude/projects/<cwd, non-alphanumerics -> ->
+    codex     newest *.jsonl under ~/.codex/sessions/
+    opencode  runs: opencode export [sessionRef] --sanitize
+`,
+  )
   .action((adapter: string, sessionRef: string | undefined, opts) => {
     const parsed = parseAdapter(adapter);
     if (parsed === null) {
@@ -99,6 +132,14 @@ program
   .option("--visibility <visibility>", "private only - a transcript is production data", "private")
   .option("--dry-run", "let enclave validate the bundle without publishing", false)
   .description("publish a bundle privately and mint a time-boxed share link")
+  .addHelpText(
+    "after",
+    `
+  Refuses locally - before enclave is invoked at all - if the scanner finds
+  anything or the bundle breaks an enclave limit. Exit 2 means nothing was
+  uploaded. Use --dry-run to let enclave validate without publishing.
+`,
+  )
   .action((bundleDir: string, opts) =>
     finish(
       pushCommand(
