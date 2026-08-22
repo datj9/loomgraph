@@ -343,10 +343,12 @@ Its own namespace, deliberately not `lg`'s.
 | --- | --- | --- |
 | `0` | Done | For `push`, save the printed link - see below |
 | `1` | Usage error, or the session/bundle was not found | Read the message; usually `--session-file` is the fix |
-| `2` | Secrets found, or the bundle broke an enclave limit | Fix what it names, then re-run. Nothing was uploaded |
+| `2` | Secrets found, an enclave limit broke, or a remote enclave step failed | Read stderr. A local-gate 2 means nothing was uploaded. A 2 after enclave ran can mean the artifact is already published - the view url is on stdout |
 
-Exit `2` from `push` means `enclave` was **never invoked**. The refusal happens locally,
-before any network call, so a bundle that fails the scan cannot leak by accident.
+Exit 2 at a local gate (scan findings, enclave constraint, or invalid `--expires`)
+means enclave was never invoked. Exit 2 after that means see stderr; a partial
+publish is possible. Missing enclave on PATH is exit 1 and also prints the view
+url when the artifact is already up.
 
 ### The share link is printed once
 
@@ -375,21 +377,24 @@ brief looks like the wrong conversation, that line is why - re-run with `--sessi
 ### What gets stripped, and what does not
 
 Before rendering, every home path becomes `${HOME}`, the repo root becomes
-`${REPO_ROOT}`, and your username becomes `user`. Tool-result blobs, attachments,
+`${REPO_ROOT}`, and a standalone username token becomes `user`. Tool-result blobs, attachments,
 file-history snapshots, codex `base_instructions`, MCP config and permission modes are
 dropped by the readers and never reach the page at all.
 
 Then the scanner runs, and `push` refuses on any hit. It knows URL-embedded credentials
-(`scheme://user:pass@host`), Anthropic, OpenAI, Stripe, GitHub, GitLab, Slack, AWS, GCP,
-npm and SendGrid key shapes, JWTs, PEM private keys, and token/secret/password
-assignments. The git remote is special-cased: it is published verbatim and never passes
-through path rewriting, so a `user:password@` in it is stripped at the source.
+(`scheme://user:pass@host`), `Authorization: Bearer` / `Basic` headers, Anthropic, OpenAI,
+Stripe (`sk_` and `rk_`), GitHub, GitLab, Slack, AWS access key ids, GCP, HuggingFace
+(`hf_`), Google OAuth (`GOCSPX-`), npm and SendGrid key shapes, JWTs, PEM private keys,
+and token/secret/password assignments. The git remote is special-cased: it is published
+verbatim and never passes through path rewriting, so a `user:password@` in it is stripped
+at the source.
 
 **This is an allowlist of shapes, not a proof.** A credential in a shape it has never seen
-goes straight through. Read the brief before you send the link - it is one screen, and you
-are the last check. If the scanner cannot read a file it was asked to scan, it reports
-that as a finding rather than staying quiet, so "clean" always means "looked at and found
-nothing".
+goes straight through. Known gaps include AWS secret access keys, PEM bodies without a
+header, hex client secrets, and non-home absolute paths. Read the brief before you send
+the link - it is one screen, and you are the last check. If the scanner cannot read a file
+it was asked to scan, it reports that as a finding rather than staying quiet, so "clean"
+always means "looked at and found nothing".
 
 ### Troubleshooting
 
