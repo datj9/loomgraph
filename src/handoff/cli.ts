@@ -26,12 +26,12 @@ function log(line: string): void {
   console.log(line);
 }
 
-/** 0 ok, 1 usage or not found, 2 scan findings or push refused. */
+/** 0 ok, 1 usage or not found, 2 local refusal or remote failure. */
 async function finish(work: Promise<number>): Promise<void> {
   try {
     process.exitCode = await work;
   } catch (err) {
-    console.error(`error: ${(err as Error).message}`);
+    console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
     process.exitCode = 1;
   }
 }
@@ -66,7 +66,7 @@ Typical run:
 Exit codes:
   0  done
   1  usage error, or the session / bundle was not found (usually: pass --session-file)
-  2  secrets found, or the bundle broke an enclave limit - NOTHING was uploaded
+  2  local gate failed (nothing uploaded), or a remote enclave step failed (see stderr)
 
 Notes:
   scan runs automatically inside both pack and push.
@@ -136,8 +136,10 @@ program
     "after",
     `
   Refuses locally - before enclave is invoked at all - if the scanner finds
-  anything or the bundle breaks an enclave limit. Exit 2 means nothing was
-  uploaded. Use --dry-run to let enclave validate without publishing.
+  anything, the bundle breaks an enclave limit, or --expires is not a duration
+  / date / date-time / zoned ISO instant. Exit 2 at that local gate means
+  nothing was uploaded. Exit 2 after enclave ran can mean a partial publish;
+  see stderr. Use --dry-run to let enclave validate without publishing.
 `,
   )
   .action((bundleDir: string, opts) =>
