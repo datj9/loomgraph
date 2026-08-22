@@ -13,7 +13,7 @@
  * logged. Import-clean: no imports from src/core/ or src/adapters/.
  */
 
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { join, resolve } from "node:path";
 import { SHARE_URL_FILE, checkEnclaveConstraints, writeBundle } from "./bundle.js";
@@ -158,6 +158,11 @@ export async function pushCommand(
     );
     return 1;
   }
+
+  // Same reason writeBundle scrubs this file: .txt is allowlisted and no scan
+  // rule matches an enclave /s/… URL, so a leftover print-once link would be
+  // uploaded as a served page on the next push.
+  rmSync(join(bundleDir, SHARE_URL_FILE), { force: true });
 
   const findings = scanBundleDir(bundleDir);
   if (findings.length > 0) {
