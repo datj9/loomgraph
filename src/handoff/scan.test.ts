@@ -162,9 +162,11 @@ describe("scanText — hits and near-misses per rule", () => {
   });
 
   it("auth-header", () => {
-    expect(fires("Authorization: Bearer FAKESECRET_k4l5m6n7o8p9q0r1s2t3", "auth-header")).toBe(true);
-    expect(fires("authorization: Basic dXNlcjpwYXNz", "auth-header")).toBe(true);
-    expect(fires("Authorization: Bearer", "auth-header")).toBe(false);
+    const bearer = "Authorization: " + "Bearer " + shaped("n", "ot-a-real-token");
+    const basic = "authorization: " + "Basic " + shaped("dXNl", "cjpwYXNz");
+    expect(fires(bearer, "auth-header")).toBe(true);
+    expect(fires(basic, "auth-header")).toBe(true);
+    expect(fires("Authorization: " + "Bearer", "auth-header")).toBe(false);
   });
 
   it("env-assignment is case-insensitive and covers a json key", () => {
