@@ -219,4 +219,36 @@ describe("reportCommand --publish", () => {
     // The fake stub records nothing: never invoked.
     expect(existsSync(capturedDir)).toBe(false);
   });
+
+  it.each(["public", "hackerman"])(
+    "refuses --visibility %s with exit code 1 and never spawns enclave",
+    async (visibility) => {
+      const out = join(work, "r1.html");
+      const code = await reportCommand(runId, {
+        out,
+        publish: true,
+        visibility: visibility as "private" | "org",
+      });
+
+      expect(code).toBe(1);
+      expect(existsSync(out)).toBe(true);
+      // The fake stub records nothing: never invoked.
+      expect(existsSync(capturedDir)).toBe(false);
+    },
+  );
+
+  it.each(["private", "org"])("still accepts --visibility %s", async (visibility) => {
+    const out = join(work, "r1.html");
+    const code = await reportCommand(runId, {
+      out,
+      publish: true,
+      title,
+      visibility: visibility as "private" | "org",
+    });
+
+    expect(code).toBe(0);
+    expect(existsSync(out)).toBe(true);
+    // The fake stub was invoked and recorded the pushed directory.
+    expect(existsSync(capturedDir)).toBe(true);
+  });
 });

@@ -31,6 +31,14 @@ export async function reportCommand(runId: string, opts: ReportOptions = {}): Pr
 
   if (opts.publish !== true) return 0;
 
+  const visibility = opts.visibility ?? "private";
+  if (visibility !== "private" && visibility !== "org") {
+    console.error(
+      `refusing --visibility ${visibility}: only private and org are allowed.`,
+    );
+    return 1;
+  }
+
   // Publish ONLY the generated report. Stage a fresh directory we own under
   // os.tmpdir(), copy the single report file into it, and hand that directory
   // to enclave. Never pass the report's parent directory (which may contain
@@ -44,7 +52,7 @@ export async function reportCommand(runId: string, opts: ReportOptions = {}): Pr
     const args = buildEnclavePushArgs(
       stagingDir,
       opts.title ?? `loomgraph run ${runId}`,
-      opts.visibility ?? "private",
+      visibility,
     );
 
     const result = await execa("enclave", args, { reject: false });
