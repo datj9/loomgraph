@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { hostname, tmpdir } from "node:os";
+import { homedir, hostname, tmpdir, userInfo } from "node:os";
 import { packCommand, pushCommand, scanCommand, type Exec } from "./commands.js";
 import { SHARE_URL_FILE, writeBundle } from "./bundle.js";
 
@@ -512,6 +512,87 @@ describe("packCommand", () => {
     expect(md).not.toContain(`on ${short} `);
     // A longer host that merely starts with the short form is untouched.
     expect(md).toContain(`${short}-ci`);
+  });
+
+  it("redacts the --title before it is written into the bundle", async () => {
+    // meta was built after redactSession and written straight out, so an author
+    // whose --title quoted a home path, the machine hostname or their account
+    // name published all three verbatim in meta.json, handoff.md and index.html.
+    const work = tempDir();
+    const sessionFile = join(work, "session.jsonl");
+    writeFileSync(sessionFile, CLAUDE_JSONL, "utf8");
+    const out = join(work, "bundle");
+    const host = hostname();
+    const home = homedir();
+    const username = userInfo().username;
+    const title = `fix ${home}/notes on ${host} for ${username} today`;
+    const fake = gitExec();
+    const { log } = collector();
+
+    expect(
+      await packCommand({ adapter: "claude", cwd: work, sessionFile, out, title }, fake.exec, log),
+    ).toBe(0);
+
+    const meta = JSON.parse(readFileSync(join(out, "meta.json"), "utf8"));
+    expect(meta.title).toBe("fix ${HOME}/notes on ${HOSTNAME} for user today");
+    for (const f of ["meta.json", "handoff.md", "index.html"]) {
+      const text = readFileSync(join(out, f), "utf8");
+      expect(text).not.toContain(home);
+      expect(text).not.toContain(host);
+      expect(text).not.toContain(` ${username} `);
+    }
+  });
+
+  it("redacts the created-by account name out of meta and the rendered brief", async () => {
+    // createdBy is userInfo().username - the exact token replaceUsernameToken
+    // scrubs everywhere else in the bundle. Rendering it in plaintext published
+    // the account name the rest of the pipeline is careful to remove.
+    const work = tempDir();
+    const sessionFile = join(work, "session.jsonl");
+    writeFileSync(sessionFile, CLAUDE_JSONL, "utf8");
+    const out = join(work, "bundle");
+    const username = userInfo().username;
+    const fake = gitExec();
+    const { log } = collector();
+
+    expect(
+      await packCommand({ adapter: "claude", cwd: work, sessionFile, out }, fake.exec, log),
+    ).toBe(0);
+
+    const meta = JSON.parse(readFileSync(join(out, "meta.json"), "utf8"));
+    expect(meta.createdBy).toBe("user");
+    expect(readFileSync(join(out, "handoff.md"), "utf8")).toContain("- created by: user");
+    for (const f of ["meta.json", "handoff.md", "index.html"]) {
+      const text = readFileSync(join(out, f), "utf8");
+      expect(new RegExp(`(^|[/\\\\@:\\s"'])${username}([/\\\\@:\\s"']|$)`).test(text)).toBe(
+        false,
+      );
+    }
+  });
+
+  it("redacts parser warnings, which quote transcript-derived values", async () => {
+    // Warnings are rendered into handoff.md verbatim and several of them quote
+    // transcript content (the git branch, unknown record type names), so they
+    // were a third path around redactSession.
+    const work = tempDir();
+    const sessionFile = join(work, "session.jsonl");
+    const home = homedir();
+    const records = [
+      { type: "user", gitBranch: `${home}/wip`, message: { role: "user", content: "go" } },
+      { type: "assistant", message: { role: "assistant", content: "done" } },
+    ];
+    writeFileSync(sessionFile, records.map((r) => JSON.stringify(r)).join("\n"), "utf8");
+    const out = join(work, "bundle");
+    const fake = gitExec();
+    const { log } = collector();
+
+    expect(
+      await packCommand({ adapter: "claude", cwd: work, sessionFile, out }, fake.exec, log),
+    ).toBe(0);
+
+    const md = readFileSync(join(out, "handoff.md"), "utf8");
+    expect(md).toContain('transcript git branch "${HOME}/wip" not carried');
+    expect(md).not.toContain(home);
   });
 
   it("strips credentials out of a remote url before publishing it", async () => {
