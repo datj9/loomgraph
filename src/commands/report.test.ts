@@ -49,7 +49,7 @@ describe("escapeHtml", () => {
 describe("renderReportHtml", () => {
   it("renders a complete html document for a run", () => {
     const out = renderReportHtml(makeState(), noEvents);
-    expect(out.startsWith("<!doctype html>")).toBe(true);
+    expect(out.startsWith("<!DOCTYPE html>")).toBe(true);
     expect(out).toContain("greet");
     expect(out).toContain("0.0000");
   });
@@ -88,7 +88,7 @@ describe("renderReportHtml", () => {
 
   it("renders a run with no nodes and no events", () => {
     const out = renderReportHtml(makeState({ nodes: {}, completed: [], status: "pending" }), noEvents);
-    expect(out.startsWith("<!doctype html>")).toBe(true);
+    expect(out.startsWith("<!DOCTYPE html>")).toBe(true);
     expect(out).toContain(
       "note: adapters that do not report a price (codex, command) record 0.0000 usd - the number is not estimated.",
     );
@@ -111,6 +111,50 @@ describe("renderReportHtml", () => {
     expect(out).toContain("node_started");
     expect(out).toContain("node_finished");
     expect(out).toContain("run_finished");
+  });
+});
+
+describe("renderReportHtml document contract", () => {
+  it("declares the document language on the root <html> element", () => {
+    const out = renderReportHtml(makeState(), noEvents);
+    expect(out).toContain('<html lang="en"');
+  });
+
+  it("emits a utf-8 charset meta tag inside <head>", () => {
+    const out = renderReportHtml(makeState(), noEvents);
+    expect(out).toContain('<meta charset="utf-8">');
+  });
+
+  it("declares the charset before <title> and within the first 1024 characters", () => {
+    const out = renderReportHtml(makeState(), noEvents);
+    const meta = out.indexOf('<meta charset=');
+    const title = out.indexOf("<title>");
+    expect(meta).toBeGreaterThanOrEqual(0);
+    expect(title).toBeGreaterThan(meta);
+    expect(meta).toBeLessThan(1024);
+  });
+
+  it("starts the document with a <!DOCTYPE html> declaration", () => {
+    const out = renderReportHtml(makeState(), noEvents);
+    expect(out.startsWith("<!DOCTYPE html>")).toBe(true);
+  });
+
+  it("keeps non-ASCII characters intact while still escaping hostile markup", () => {
+    const state = makeState({
+      graphName: "café → <plan>",
+      nodes: {
+        greet: {
+          nodeId: "greet", status: "failed",
+          startedAt: "2026-08-14T12:00:00.000Z", endedAt: "2026-08-14T12:00:30.000Z",
+          attempts: 1, output: "", error: "café → boom </td>", costUsd: 0,
+        },
+      },
+    });
+    const out = renderReportHtml(state, noEvents);
+    expect(out).toContain("café → &lt;plan&gt;");
+    expect(out).toContain("café → boom &lt;/td&gt;");
+    expect(out).not.toContain("<plan>");
+    expect(out).not.toContain("boom </td>");
   });
 });
 
