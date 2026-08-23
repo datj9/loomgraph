@@ -1,4 +1,4 @@
-import { execa } from "execa";
+import { clampCostUsd, runProcess } from "./types.js";
 import type { Adapter, AdapterInput, AdapterOutput } from "./types.js";
 
 /**
@@ -27,7 +27,28 @@ import type { Adapter, AdapterInput, AdapterOutput } from "./types.js";
  * "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted", which makes
  * every repository read fail and the review useless.
  */
-export type CodexSandbox = "read-only" | "workspace-write" | "bypass";
+const CODEX_SANDBOXES = ["read-only", "workspace-write", "bypass"] as const;
+
+export type CodexSandbox = (typeof CODEX_SANDBOXES)[number];
+
+/**
+ * Validate the LOOMGRAPH_CODEX_SANDBOX override rather than casting it.
+ * An unvalidated cast lets a typo through in both directions: an invented
+ * value like "danger-full-access" reads as a wider policy that is never
+ * applied, and "READ-ONLY" reaches codex verbatim and fails inside it. Fail
+ * here instead, naming the three values that work.
+ */
+export function resolveCodexSandbox(raw: string | undefined | null): CodexSandbox {
+  const value = (raw ?? "").trim();
+  if (value.length === 0) return "read-only";
+  const match = CODEX_SANDBOXES.find((candidate) => candidate === value);
+  if (match === undefined) {
+    throw new Error(
+      `invalid LOOMGRAPH_CODEX_SANDBOX "${raw}" - valid values are ${CODEX_SANDBOXES.join(", ")}`,
+    );
+  }
+  return match;
+}
 
 export function buildCodexArgs(
   prompt: string,
@@ -91,7 +112,8 @@ export function parseCodexJsonl(stdout: string): AdapterOutput {
   }
 
   // Codex normally reports no price at all. Record 0 rather than estimating one.
-  const costUsd = cumulativeUsd ?? deltaUsd;
+  // A negative report is treated as 0 - it must never drive the budget back.
+  const costUsd = clampCostUsd(cumulativeUsd ?? deltaUsd);
 
   if (text === null) {
     return {
@@ -107,10 +129,51 @@ export function parseCodexJsonl(stdout: string): AdapterOutput {
 }
 
 /**
+ * A broken codex sandbox makes every repository read fail with a bubblewrap
+ * diagnostic like "bwrap: loopback: Failed RTM_NEWADDR: Operation not
+ * permitted". bwrap fails per TOOL CALL rather than at startup, so codex keeps
+ * talking, exits 0, and can hand back a confident "PASS" from a verifier that
+ * read nothing at all. Trusting the exit code lets that through, so the
+ * diagnostic is looked for explicitly on both streams.
+ *
+ * Matching is anchored to a line that starts with "bwrap:" - that is the shape
+ * bubblewrap writes - so an agent message that merely discusses bwrap in prose
+ * does not fail the node.
+ */
+export function detectSandboxFailure(text: string): string | null {
+  for (const line of text.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("bwrap:")) return trimmed;
+  }
+  return null;
+}
+
+function sandboxFailureMessage(stderr: string, stdout: string): string | null {
+  const line = detectSandboxFailure(stderr) ?? detectSandboxFailure(stdout);
+  if (line === null) return null;
+  return (
+    `codex sandbox failed (${line}) - the verifier could not read the tree, so its verdict means nothing; ` +
+    `set LOOMGRAPH_CODEX_SANDBOX=bypass only on an already isolated host`
+  );
+}
+
+/**
  * Decide the final result once the process has exited. Kept separate from
  * `run` so the exit-code policy is unit-testable without spawning codex.
  */
-export function decideCodexResult(parsed: AdapterOutput, exitCode: number | undefined, stderr: string): AdapterOutput {
+export function decideCodexResult(
+  parsed: AdapterOutput,
+  exitCode: number | undefined,
+  stderr: string,
+  stdout = "",
+): AdapterOutput {
+  // Check the sandbox before the exit code: a broken sandbox fails every read
+  // even when codex exits 0 and the agent message contains the pass string.
+  const sandbox = sandboxFailureMessage(stderr, stdout);
+  if (sandbox !== null) {
+    return { ...parsed, ok: false, error: sandbox };
+  }
+
   const trimmed = stderr.trim();
   const failed = exitCode !== 0 && exitCode !== undefined;
 
@@ -130,26 +193,28 @@ export class CodexAdapter implements Adapter {
 
   constructor(
     private readonly bin = "codex",
-    private readonly sandbox: CodexSandbox = (process.env.LOOMGRAPH_CODEX_SANDBOX as CodexSandbox) ?? "read-only",
+    private readonly sandbox: CodexSandbox = resolveCodexSandbox(process.env.LOOMGRAPH_CODEX_SANDBOX),
   ) {}
 
   async run(input: AdapterInput): Promise<AdapterOutput> {
-    const result = await execa(this.bin, buildCodexArgs(input.prompt, input.cwd, this.sandbox, input.model), {
-      cwd: input.cwd,
-      timeout: input.timeoutSec * 1000,
-      reject: false,
-      // Codex waits on stdin when it stays open, which stalls the node until the
-      // timeout fires. Close it so the run is genuinely non-interactive.
-      input: "",
-    });
+    const result = await runProcess(
+      this.bin,
+      buildCodexArgs(input.prompt, input.cwd, this.sandbox, input.model),
+      { cwd: input.cwd, timeoutSec: input.timeoutSec },
+    );
 
-    const stdout = typeof result.stdout === "string" ? result.stdout : "";
-    const stderr = typeof result.stderr === "string" ? result.stderr : "";
+    const { stdout, stderr } = result;
+
+    // Name the binary rather than letting an empty stdout surface as a parse
+    // failure with no clue about what is missing.
+    if (result.spawnErrorCode === "ENOENT") {
+      return { ok: false, text: "", costUsd: 0, raw: { stdout, stderr }, error: `${this.bin} not found on PATH` };
+    }
 
     if (result.timedOut) {
       return { ok: false, text: stdout, costUsd: 0, raw: { stdout, stderr }, error: `timeout after ${input.timeoutSec}s` };
     }
 
-    return decideCodexResult(parseCodexJsonl(stdout), result.exitCode, stderr);
+    return decideCodexResult(parseCodexJsonl(stdout), result.exitCode, stderr, stdout);
   }
 }
