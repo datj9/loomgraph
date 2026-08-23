@@ -838,6 +838,42 @@ edges:
     expect(String(exceeded[0]!.data.reason)).toMatch(/maxNodeRuns/);
   });
 
+  it("names a genuine node failure alongside the budget stop that ended the run", async () => {
+    const src = `
+name: mask
+budget: { maxUsd: 999, maxWallClockSec: 999999, maxNodeRuns: 4 }
+nodes:
+  a: { type: command, run: "echo a" }
+  b: { type: command, run: "broken b", retries: 2 }
+  c: { type: command, run: "broken c", retries: 2 }
+edges:
+  - { from: a, to: b }
+  - { from: a, to: c }
+  - { from: b, to: END }
+  - { from: c, to: END }
+`;
+    // a costs one run, leaving three for b and c - fewer than the six their
+    // retries would take, so the batch ends on a budget refusal while both
+    // siblings are also failing for a real reason of their own.
+    const registry = {
+      command: stub("command", (i) =>
+        i.prompt === "echo a" ? ok("a") : bad(`disk full running ${i.prompt}`),
+      ),
+    };
+
+    const final = await execute(parseGraph(src), start(src, "mask-run"), deps(registry));
+
+    expect(final.status).toBe("failed");
+    const finished = log.read("mask-run").filter((e) => e.kind === "run_finished");
+    expect(finished).toHaveLength(1);
+    const reason = String(finished[0]!.data.error);
+    // The budget is still the top-line cause: it is why the run stopped here.
+    expect(reason).toMatch(/maxNodeRuns/);
+    // But the real failure must not be swallowed - it is the thing an operator
+    // has to fix before raising the ceiling would help.
+    expect(reason).toMatch(/disk full/);
+  });
+
   it("fails a run whose final spend exceeds the usd ceiling", async () => {
     const src = `
 name: overshoot

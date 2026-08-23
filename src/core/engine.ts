@@ -275,7 +275,11 @@ export async function execute(graph: Graph, initial: RunState, deps: EngineDeps)
       const admission = checkBudget(projected);
       if (!admission.ok) {
         budgetStopReason = admission.reason;
-        lastError = admission.reason;
+        // Only claim the budget as this node's own error when the node never
+        // got to run. Once an attempt has failed for a real reason, that
+        // reason is what an operator needs; overwriting it here is what let a
+        // budget stop bury a genuine failure in the run's finish reason.
+        if (attempts === 0) lastError = admission.reason;
         break;
       }
       reservedNodeRuns += 1;
@@ -448,6 +452,17 @@ export async function execute(graph: Graph, initial: RunState, deps: EngineDeps)
       // exactly like the part A admission stop, not as a generic node failure.
       if (budgetStopReason !== null) {
         emit({ kind: "budget_exceeded", data: { reason: budgetStopReason, spent: state.spent, budget: state.budget } });
+        // The budget is the top-line cause - it is why the run stopped at this
+        // batch. But a sibling can fail for a reason of its own in the same
+        // batch, and that is the thing an operator has to fix before raising
+        // the ceiling would help, so name it too rather than let the budget
+        // message bury it. A node refused by the budget carries the budget
+        // reason as its own error; those are the same event, not a second one.
+        const genuine = failed.filter((r) => r.error !== budgetStopReason);
+        if (genuine.length > 0) {
+          const detail = genuine.map((r) => `${r.nodeId}: ${r.error}`).join("; ");
+          return finish("failed", `${budgetStopReason} - also failed - ${detail}`);
+        }
         return finish("failed", budgetStopReason);
       }
       if (failed.length > 0) {
