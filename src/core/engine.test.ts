@@ -561,6 +561,34 @@ edges:
     expect((exceeded[0]!.data.spent as { nodeRuns: number }).nodeRuns).toBe(2);
   });
 
+  it("refuses a retry attempt that would exceed maxNodeRuns, reporting budget_exceeded (C2 part B)", async () => {
+    const src = `
+name: c2b-retry
+budget: { maxUsd: 999, maxWallClockSec: 999999, maxNodeRuns: 2 }
+nodes:
+  a: { type: command, run: "always broken", retries: 2 }
+edges:
+  - { from: a, to: END }
+`;
+    // The node always fails, so with retries 2 it would normally make 3 attempts.
+    const registry = { command: stub("command", () => bad("still broken")) };
+    const final = await execute(parseGraph(src), start(src, "c2b-run"), deps(registry));
+
+    expect(final.status).toBe("failed");
+    expect(final.nodes.a!.status).toBe("failed");
+    // The second attempt is the last one the budget permits; the third is refused.
+    expect(final.nodes.a!.attempts).toBe(2);
+    expect(final.nodes.a!.attempts).not.toBe(3);
+    expect(final.nodes.a!.attempts).not.toBe(4);
+    const started = log.read("c2b-run").filter((e) => e.kind === "node_started" && e.nodeId === "a");
+    expect(started).toHaveLength(2);
+    expect(final.spent.nodeRuns).toBe(2);
+
+    const exceeded = log.read("c2b-run").filter((e) => e.kind === "budget_exceeded");
+    expect(exceeded).toHaveLength(1);
+    expect(String(exceeded[0]!.data.reason)).toMatch(/maxNodeRuns/);
+  });
+
   it("fails a run whose final spend exceeds the usd ceiling", async () => {
     const src = `
 name: overshoot

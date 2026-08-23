@@ -186,6 +186,10 @@ export async function execute(graph: Graph, initial: RunState, deps: EngineDeps)
   const answers = deps.humanAnswers ?? {};
 
   let state = initial;
+  // Shared with the admission pass below: set by both the batch admission and
+  // a retry refused inside executeNode, and always consumed by the budget
+  // stop path (emit budget_exceeded + finish("failed", reason)).
+  let budgetStopReason: string | null = null;
   if (state.status === "succeeded" || state.status === "failed") {
     throw new EngineError(`run ${state.runId} is already ${state.status} and cannot be executed again`);
   }
@@ -217,6 +221,19 @@ export async function execute(graph: Graph, initial: RunState, deps: EngineDeps)
     let lastText = "";
 
     while (attempts < maxAttempts) {
+      // C2 part B: a retry is a node run like any other, so one must never be
+      // spent once the ceilings would be crossed. Check the budget before each
+      // attempt and stop retrying the moment it refuses. The first attempt of
+      // an admitted node always passes: part A already admitted it with a
+      // projection of one run, and attempts + 1 equals 1 here.
+      const projected = recordSpend(state, { usd: 0, nodeRuns: attempts + 1 });
+      const admission = checkBudget(projected);
+      if (!admission.ok) {
+        budgetStopReason = admission.reason;
+        lastError = admission.reason;
+        break;
+      }
+
       attempts += 1;
       emit({ kind: "node_started", nodeId: id, data: { attempt: attempts, type: def.type } });
 
@@ -334,7 +351,6 @@ export async function execute(graph: Graph, initial: RunState, deps: EngineDeps)
       // admitted still runs concurrently, checkpointing as each lands.
       let projection = state;
       const admitted: string[] = [];
-      let budgetStopReason: string | null = null;
       for (const id of batch) {
         projection = recordSpend(projection, { usd: 0, nodeRuns: 1 });
         const admission = checkBudget(projection);
@@ -354,14 +370,15 @@ export async function execute(graph: Graph, initial: RunState, deps: EngineDeps)
       );
 
       const failed = results.filter((r) => r.status === "failed");
-      if (failed.length > 0) {
-        const detail = failed.map((r) => `${r.nodeId}: ${r.error}`).join("; ");
-        return finish("failed", `node failed after ${failed[0]!.attempts} attempt(s) - ${detail}`);
-      }
-
+      // C2 part B: a retry refused by the budget must surface as budget_exceeded,
+      // exactly like the part A admission stop, not as a generic node failure.
       if (budgetStopReason !== null) {
         emit({ kind: "budget_exceeded", data: { reason: budgetStopReason, spent: state.spent, budget: state.budget } });
         return finish("failed", budgetStopReason);
+      }
+      if (failed.length > 0) {
+        const detail = failed.map((r) => `${r.nodeId}: ${r.error}`).join("; ");
+        return finish("failed", `node failed after ${failed[0]!.attempts} attempt(s) - ${detail}`);
       }
     }
   }
