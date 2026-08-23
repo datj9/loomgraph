@@ -63,6 +63,7 @@ describe("SCAN_RULES", () => {
       "netrc-credentials",
       "auth-json-credential",
       "abs-home-path",
+      "residual-local-hostname",
     ]);
   });
 });
@@ -182,13 +183,56 @@ describe("scanText — hits and near-misses per rule", () => {
     expect(fires('{"Authorization":"' + 'Bearer"}', "auth-header")).toBe(false);
   });
 
-  it("netrc-credentials", () => {
+  it("auth-header covers non-Bearer/Basic auth schemes", () => {
+    // GitHub's own scheme name.
+    expect(fires("Authorization: token " + shaped("ghp", "_FAKEfake0000FAKEfake0000"), "auth-header")).toBe(true);
+    // A vendor-invented scheme name.
+    expect(fires("Authorization: ApiKey " + shaped("sk_live", "_FAKEfake0000FAKEfake0000"), "auth-header")).toBe(true);
+    // Digest auth, whose "value" is a list of quoted directives, not a bare token.
+    expect(
+      fires('Authorization: Digest username="alice", realm="api", response="' + shaped("FAKE", "fakedigest0000") + '"', "auth-header"),
+    ).toBe(true);
+    // AWS SigV4, whose scheme name itself contains digits and hyphens.
+    expect(
+      fires("Authorization: AWS4-HMAC-SHA256 Credential=" + shaped("AKIA", "FAKEFAKEFAKE0000") + "/20260101/us-east-1/s3/aws4_request", "auth-header"),
+    ).toBe(true);
+    // A scheme name with no credential-shaped value must still not fire.
+    expect(fires("Authorization: see the docs", "auth-header")).toBe(false);
+  });
+
+  it("netrc-credentials — the one-line form", () => {
     const row = "machine api.example.com login alice password " + shaped("FAKE", "fakesecret0000");
     expect(fires(row, "netrc-credentials")).toBe(true);
     expect(fires("  machine gitlab.example.com login bot password " + shaped("FAKE", "fakesecret0000"), "netrc-credentials")).toBe(true);
     // Prose that merely mentions the words is not a .netrc row.
     expect(fires("the machine has a login and a password", "netrc-credentials")).toBe(false);
     expect(fires("machine api.example.com login alice", "netrc-credentials")).toBe(false);
+  });
+
+  it("netrc-credentials — the real netrc(5) multi-line form", () => {
+    // A real .netrc file is one field per line, so the one-line rule can never
+    // see it: `scanText` splits on `\n` and runs every rule per line.
+    const multiline = [
+      "machine api.example.com",
+      "login myuser",
+      "password " + shaped("FAKE", "fakesecret0000"),
+    ].join("\n");
+    const hits = rules(multiline);
+    expect(hits).toContain("netrc-credentials");
+    // Must fire on the password line specifically (the line carrying the secret).
+    const findings = scanText(multiline, "f.md").filter((f) => f.rule === "netrc-credentials");
+    expect(findings.some((f) => f.line === 3)).toBe(true);
+
+    // A bare `login <value>` line alone (no password yet) is still worth flagging.
+    expect(fires("login myuser", "netrc-credentials")).toBe(true);
+    expect(fires("password " + shaped("FAKE", "fakesecret0000"), "netrc-credentials")).toBe(true);
+
+    // Prose that happens to start a sentence with these words must not fire:
+    // the rule only matches when the ENTIRE line is `keyword value`.
+    expect(fires("login to the dashboard first", "netrc-credentials")).toBe(false);
+    expect(fires("password reset instructions are below", "netrc-credentials")).toBe(false);
+    expect(fires("the login page needs a password", "netrc-credentials")).toBe(false);
+    expect(fires("See the login and password fields.", "netrc-credentials")).toBe(false);
   });
 
   it("auth-json-credential covers opencode auth.json shapes", () => {
@@ -207,6 +251,16 @@ describe("scanText — hits and near-misses per rule", () => {
     // Placeholders are not secrets.
     expect(fires("MY_SERVICE_TOKEN=", "env-assignment")).toBe(false);
     expect(fires('MY_SERVICE_TOKEN=""', "env-assignment")).toBe(false);
+  });
+
+  it("residual-local-hostname catches a leftover mDNS-style machine hostname", () => {
+    expect(fires("built on dats-macbook.local", "residual-local-hostname")).toBe(true);
+    // Case must not matter: this is exactly the shape a case-sensitive
+    // replacement would leave behind.
+    expect(fires("built on DATS-MACBOOK.local", "residual-local-hostname")).toBe(true);
+    expect(fires("built on Dats-MacBook.LOCAL".toLowerCase(), "residual-local-hostname")).toBe(true);
+    // Already rewritten.
+    expect(fires("built on ${HOSTNAME}", "residual-local-hostname")).toBe(false);
   });
 
   it("abs-home-path accepts a lower-case windows drive letter", () => {
@@ -437,6 +491,26 @@ describe("rewritePaths", () => {
       hostname: "web1",
     });
     expect(out).toBe("host ${HOSTNAME} vs web10 vs web1a vs xweb1");
+  });
+
+  it("rewrites the hostname regardless of case", () => {
+    const out = rewritePaths("built on DATS-MACBOOK.LOCAL and Dats-Macbook", {
+      home: "/Users/dat",
+      username: "dat",
+      repoRoot: "/Users/dat/app",
+      hostname: "dats-macbook.local",
+    });
+    expect(out).toBe("built on ${HOSTNAME} and ${HOSTNAME}");
+    expect(fires(out, "residual-local-hostname")).toBe(false);
+  });
+
+  it("rewrites the username regardless of case", () => {
+    const out = rewritePaths("author DAT pushed the change", {
+      home: "/Users/dat",
+      username: "dat",
+      repoRoot: "/Users/dat/app",
+    });
+    expect(out).toBe("author user pushed the change");
   });
 
   it("leaves the text alone when no hostname is supplied", () => {

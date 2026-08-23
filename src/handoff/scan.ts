@@ -134,16 +134,38 @@ export const SCAN_RULES: ReadonlyArray<{
   {
     name: "auth-header",
     // Optional quotes around the name and the scheme cover the JSON-encoded
-    // form of the same header, e.g. `{"Authorization":"Bearer ..."}`.
-    pattern: /\bAuthorization"?\s*:\s*"?(?:Bearer|Basic)\s+\S+/i,
-    description: "Authorization Bearer or Basic header",
+    // form of the same header, e.g. `{"Authorization":"Bearer ..."}`. The
+    // scheme is not limited to Bearer/Basic - `token`, `ApiKey`, `Digest` and
+    // `AWS4-HMAC-SHA256` are all real schemes seen in the wild - so the scheme
+    // itself is any word-shaped token. Deliberately NOT case-insensitive
+    // overall (only the `[Aa]uthorization` header name is): an `i` flag would
+    // make the "must not be a plain lowercase word" check below meaningless,
+    // since it would treat every letter as interchangeable and defeat the one
+    // signal that tells a credential apart from prose ("Authorization: see
+    // the docs" must not fire). The value lookahead requires the token to
+    // contain something other than a lowercase letter or whitespace - a
+    // digit, an underscore, a dash, an `=`, a quote, or an upper-case letter -
+    // which every real credential shape here has (even the base64 Basic value
+    // is mixed-case) but ordinary English continuation words do not.
+    pattern:
+      /\b[Aa]uthorization"?\s*:\s*"?[A-Za-z][A-Za-z0-9._-]{1,40}\s+(?=\S{6,})(?=\S*[^a-z\s])\S+/,
+    description: "Authorization header carrying a credential, for any auth scheme",
   },
   {
     name: "netrc-credentials",
     // A .netrc row is space-separated with no `=` or `:`, so no assignment rule
-    // can see it. Requiring all three keywords in order keeps prose out.
-    pattern: /\bmachine\s+\S+\s+login\s+\S+\s+password\s+\S+/i,
-    description: ".netrc machine/login/password row",
+    // can see it. Requiring all three keywords in order keeps prose out - this
+    // covers the one-line form some tools emit. The real netrc(5) format is
+    // one field per line, which `scanText`'s per-line matching can never see
+    // as a single multi-line match, so the second alternative catches a bare
+    // `login <value>` or `password <value>` line on its own. Anchoring to the
+    // WHOLE line (leading/trailing `\s*`, exactly one token after the
+    // keyword) is what keeps prose like "login to the dashboard first" or
+    // "password reset instructions" out - those have more than one word after
+    // the keyword, so the `$` anchor never lines up.
+    pattern:
+      /(?:\bmachine\s+\S+\s+login\s+\S+\s+password\s+\S+)|(?:^\s*(?:login|password)\s+\S+\s*$)/i,
+    description: ".netrc machine/login/password row, one-line or netrc(5) multi-line form",
   },
   {
     name: "auth-json-credential",
@@ -157,6 +179,19 @@ export const SCAN_RULES: ReadonlyArray<{
     // Residual absolute home directory left after rewritePaths ran.
     pattern: /(?:\/Users\/[^/\s:"'\\]+\/|\/home\/[^/\s:"'\\]+\/|[a-zA-Z]:\\Users\\[^\\\s:"']+\\)/,
     description: "Absolute home path that path rewriting did not remove",
+  },
+  {
+    name: "residual-local-hostname",
+    // Backstop for a leftover machine hostname, the same role `abs-home-path`
+    // plays for a leftover home directory. Unlike a home path, an arbitrary
+    // hostname has no generic shape to anchor on - but the mDNS `.local`
+    // suffix macOS/Bonjour hostnames use (`Dat-Laptop.local`) is specific
+    // enough to flag without false-firing on ordinary prose. This exists
+    // because `replaceHostnameToken` only removes the hostname it was told
+    // about; a case-mismatched or unsupplied hostname would otherwise publish
+    // with the CLI still reporting "scan clean".
+    pattern: /\b[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.local\b/,
+    description: "Residual mDNS-style (.local) machine hostname that rewriting did not remove",
   },
 ];
 
@@ -296,7 +331,9 @@ function replaceLiteral(text: string, needle: string, replacement: string): stri
 function replaceUsernameToken(text: string, username: string): string {
   if (username.length === 0) return text;
   const escaped = username.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const re = new RegExp(`(^|[/\\\\@:\\s"'])${escaped}(?=[/\\\\@:\\s"']|$)`, "g");
+  // Case-insensitive: a transcript can quote the username exactly as the OS
+  // capitalized it (`DAT`, `Dat`), not only in the case the caller supplied.
+  const re = new RegExp(`(^|[/\\\\@:\\s"'])${escaped}(?=[/\\\\@:\\s"']|$)`, "gi");
   return text.replace(re, "$1user");
 }
 
@@ -310,7 +347,10 @@ function replaceUsernameToken(text: string, username: string): string {
 function replaceHostnameToken(text: string, host: string): string {
   if (host.length === 0) return text;
   const escaped = host.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const re = new RegExp(`(^|[^A-Za-z0-9.-])${escaped}(?![A-Za-z0-9.-])`, "g");
+  // Case-insensitive: `hostname()` reports whatever case the OS stored, but a
+  // transcript can quote the same machine in a different case (a log line, a
+  // pasted prompt), and a case-mismatched leftover is a silent scan bypass.
+  const re = new RegExp(`(^|[^A-Za-z0-9.-])${escaped}(?![A-Za-z0-9.-])`, "gi");
   return text.replace(re, (_match, prefix: string) => `${prefix}${HOSTNAME_PLACEHOLDER}`);
 }
 
