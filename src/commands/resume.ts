@@ -1,8 +1,8 @@
 import { defaultRegistry } from "../adapters/registry.js";
-import { execute } from "../core/engine.js";
+import { execute, readySet } from "../core/engine.js";
 import { parseGraph } from "../core/graph.js";
 import { formatEventLine, openLog, openStore } from "./context.js";
-import { exitCodeFor, parseVars, renderStatus } from "./render.js";
+import { exitCodeFor, renderStatus } from "./render.js";
 
 export interface ResumeOptions {
   answer: string[];
@@ -30,13 +30,31 @@ export async function resumeCommand(runId: string, options: ResumeOptions): Prom
 
   let humanAnswers: Record<string, string>;
   try {
-    humanAnswers = parseVars(options.answer ?? []);
+    humanAnswers = {};
+    for (const pair of options.answer ?? []) {
+      const eq = pair.indexOf("=");
+      if (eq <= 0) throw new Error(`--answer expects nodeId=text, got "${pair}"`);
+      humanAnswers[pair.slice(0, eq)] = pair.slice(eq + 1);
+    }
   } catch (err) {
-    console.error(`--answer expects nodeId=text: ${(err as Error).message}`);
+    console.error((err as Error).message);
     return 1;
   }
 
   const graph = parseGraph(source, `${runId}/graph.yaml`);
+
+  const awaiting = readySet(graph, state).filter((id) => graph.nodes[id]!.type === "human");
+  for (const nodeId of Object.keys(humanAnswers)) {
+    if (graph.nodes[nodeId] === undefined) {
+      console.error(`--answer: no node "${nodeId}" in this run`);
+      return 1;
+    }
+    if (!awaiting.includes(nodeId)) {
+      console.error(`--answer: node "${nodeId}" is not awaiting an answer`);
+      return 1;
+    }
+  }
+
   const final = await execute(graph, state, {
     store,
     log,
