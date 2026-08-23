@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { parseGraph } from "./graph.js";
 import { CheckpointStore } from "./store.js";
 import { EventLog } from "./events.js";
-import { execute, newRunState, interpolate, readySet, EngineError } from "./engine.js";
+import { execute, newRunState, interpolate, readySet, containsPassToken, EngineError } from "./engine.js";
 import * as engine from "./engine.js";
 import type { EngineDeps } from "./engine.js";
 import type { Adapter, AdapterInput, AdapterOutput } from "../adapters/types.js";
@@ -166,6 +166,25 @@ describe("checkCommandExpectations", () => {
 
   it("prefers the blank-output message when both expectations fail", () => {
     expect(check({ expect: "PASS", expectNonEmpty: true }, "")).toBe("command produced no output but expectNonEmpty is set");
+  });
+});
+
+describe("containsPassToken", () => {
+  it("matches a whole word but not a substring of a longer word", () => {
+    expect(containsPassToken("looks good - PASS", "PASS")).toBe(true);
+    expect(containsPassToken("PASS", "PASS")).toBe(true);
+    expect(containsPassToken("conclusion: PASS.", "PASS")).toBe(true);
+    expect(containsPassToken("(PASS)", "PASS")).toBe(true);
+    expect(containsPassToken("PASSWORD", "PASS")).toBe(false);
+    expect(containsPassToken("BYPASS", "PASS")).toBe(false);
+    expect(containsPassToken("xPASS", "PASS")).toBe(false);
+    expect(containsPassToken("PASSx", "PASS")).toBe(false);
+  });
+
+  it("matches the pass string literally, including regex metacharacters", () => {
+    expect(containsPassToken("status is ok? - done", "ok?")).toBe(true);
+    expect(containsPassToken("okay?", "ok?")).toBe(false);
+    expect(containsPassToken("[DONE]", "[DONE]")).toBe(true);
   });
 });
 
@@ -400,6 +419,28 @@ edges:
     const final = await execute(parseGraph(src), start(src, "fail-run"), deps(failing));
     expect(final.status).toBe("failed");
     expect(final.nodes.v!.error).toMatch(/PASS/);
+  });
+
+  it("does not let a substring of a longer word satisfy a verifier's pass string", async () => {
+    const src = `
+name: verify
+budget: { maxUsd: 10, maxWallClockSec: 600, maxNodeRuns: 20 }
+nodes:
+  v: { type: verifier, adapter: codex, prompt: "review", pass: "PASS" }
+edges:
+  - { from: v, to: END }
+`;
+    for (const output of ["password confirmed", "BYPASS every check", "xPASS", "PASSx", "mismatch: password"]) {
+      const registry = { codex: stub("codex", () => ok(output)) };
+      const final = await execute(parseGraph(src), start(src, `run-${output}`), deps(registry));
+      expect(final.status, `output "${output}" must fail`).toBe("failed");
+      expect(final.nodes.v!.error).toMatch(/did not report the pass string/);
+    }
+
+    const boundary = { codex: stub("codex", () => ok("PASS")) };
+    expect((await execute(parseGraph(src), start(src, "boundary-run"), deps(boundary))).status).toBe("succeeded");
+    const ending = { codex: stub("codex", () => ok("conclusion: PASS.")) };
+    expect((await execute(parseGraph(src), start(src, "ending-run"), deps(ending))).status).toBe("succeeded");
   });
 
   it("fails a command node whose output does not meet its expectations", async () => {

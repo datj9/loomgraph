@@ -124,6 +124,22 @@ export function checkCommandExpectations(
   return null;
 }
 
+/** Escape a literal string so it can appear inside a RegExp. */
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * True when `pass` appears in `text` as a whole token, not as a raw substring.
+ * The token must not be glued to word characters on either side, so "PASS"
+ * matches "looks good - PASS" but not "PASSWORD" or "BYPASS". The pass string
+ * itself is otherwise matched literally.
+ */
+export function containsPassToken(text: string, pass: string): boolean {
+  const boundary = "(?:^|[^A-Za-z0-9_])";
+  return new RegExp(`${boundary}${escapeRegExp(pass)}(?:$|[^A-Za-z0-9_])`).test(text);
+}
+
 /**
  * The batches the scheduler would dispatch, in order. Pure - used by
  * `lg run --dry-run`, which must not spawn anything.
@@ -244,7 +260,7 @@ export async function execute(graph: Graph, initial: RunState, deps: EngineDeps)
       timeoutSec: def.timeoutSec,
     });
 
-    if (def.type === "verifier" && out.ok && !out.text.includes(def.pass)) {
+    if (def.type === "verifier" && out.ok && !containsPassToken(out.text, def.pass)) {
       return { ...out, ok: false, error: `verifier "${id}" did not report the pass string "${def.pass}"` };
     }
     return out;
