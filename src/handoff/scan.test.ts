@@ -231,6 +231,18 @@ describe("scanText — hits and near-misses per rule", () => {
     expect(fires("rotate the ENCLAVE_TOKEN weekly", "env-assignment")).toBe(false);
   });
 
+  it("env-assignment does not fire on prose that merely mentions a secret name", () => {
+    // This exact line blocked a real bundle. A short unquoted word is prose, not a secret.
+    expect(fires("Standalone token: user", "env-assignment")).toBe(false);
+    expect(fires("the secret: none", "env-assignment")).toBe(false);
+    expect(fires("password: yes", "env-assignment")).toBe(false);
+    // A secret name embedded in a longer word is not an assignment either.
+    expect(fires("monkey=" + shaped("FAKE", "fakevalue0000"), "env-assignment")).toBe(false);
+    // Real assignments must survive.
+    expect(fires("MY_SERVICE_TOKEN=" + shaped("FAKE", "fakevalue0000"), "env-assignment")).toBe(true);
+    expect(fires('APP_SECRET: "' + shaped("FAKE", "fakevalue0000") + '"', "env-assignment")).toBe(true);
+  });
+
   it("env-assignment catches a bare key assignment in both shell and json shapes", () => {
     expect(fires("key=" + shaped("FAKE", "fakevalue0000"), "env-assignment")).toBe(true);
     expect(fires('{"key": "' + shaped("FAKE", "fakevalue0000") + '"}', "env-assignment")).toBe(true);
@@ -510,5 +522,18 @@ describe("stripUrlCredentials", () => {
     const tokenAsUser = `https://${shaped("ghp", "_FAKEfake0000FAKEfake0000")}@github.com/o/r.git`;
     expect(stripUrlCredentials(tokenAsUser)).toBe(tokenAsUser);
     expect(scanText(tokenAsUser, "meta.json").map((f) => f.rule)).toContain("github-token");
+  });
+});
+
+describe("scanText - performance", () => {
+  it("scans a 64k single-character line in well under two seconds", () => {
+    // Regression guard: the env-assignment prefix used to rescan to end-of-line at
+    // every offset, which made this line take ~9 seconds.
+    const line = "a".repeat(65536);
+    const started = performance.now();
+    const findings = scanText(line, "big.md");
+    const elapsedMs = performance.now() - started;
+    expect(findings).toEqual([]);
+    expect(elapsedMs).toBeLessThan(2000);
   });
 });

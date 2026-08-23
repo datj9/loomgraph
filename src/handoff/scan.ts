@@ -80,10 +80,15 @@ export const SCAN_RULES: ReadonlyArray<{
     // or a lower-case shell export is the same secret. The name may also BE the
     // word (`password: x`), not just end in it. A bare `key` name counts too,
     // because an opencode / .netrc style config writes the credential under
-    // exactly that name. The value must be non-empty: `FOO_TOKEN=` and
-    // `FOO_TOKEN=""` are placeholders, not secrets.
+    // exactly that name. The lookbehind anchors the name to a real word start,
+    // so `monkey=x` is not a `key=x` assignment and the prefix never gets to
+    // rescan to end-of-line at every offset - that was a quadratic blow-up: a
+    // 64k line took 9 seconds. The value must be non-empty, and an unquoted
+    // value must be at least 8 characters: `FOO_TOKEN=` and `FOO_TOKEN=""` are
+    // placeholders, a quoted value is a config value, but a short bare word is
+    // prose - `Standalone token: user` used to block a bundle.
     pattern:
-      /(?:[A-Za-z0-9_]*_)?(?:TOKEN|SECRET|PASSWD|PASSWORD|API[_-]?KEY|KEY)"?\s*[:=]\s*(?:"[^"\s]+"|'[^'\s]+'|[^\s"';,]+)/i,
+      /(?<![A-Za-z0-9_-])(?:[A-Za-z0-9]+[_-])*(?:TOKEN|SECRET|PASSWD|PASSWORD|API[_-]?KEY|KEY)"?\s*[:=]\s*(?:"[^"\s]+"|'[^'\s]+'|[^\s"';,]{8,})/i,
     description: "Assignment to a token / secret / password / api-key name",
   },
   {
