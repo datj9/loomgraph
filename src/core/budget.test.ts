@@ -20,16 +20,33 @@ describe("checkBudget", () => {
     expect(res.ok).toBe(true);
   });
 
-  it("fails exactly at the usd ceiling", () => {
+  it("passes at exactly the usd ceiling (exclusive)", () => {
     const res = checkBudget(makeState({ spent: { usd: 1, wallClockSec: 0, nodeRuns: 0 } }));
+    expect(res.ok).toBe(true);
+  });
+
+  it("passes at exactly the node-run ceiling (exclusive)", () => {
+    const res = checkBudget(makeState({ spent: { usd: 0, wallClockSec: 0, nodeRuns: 5 } }));
+    expect(res.ok).toBe(true);
+  });
+
+  it("fails just over the usd ceiling", () => {
+    const res = checkBudget(makeState({ spent: { usd: 1.01, wallClockSec: 0, nodeRuns: 0 } }));
     expect(res.ok).toBe(false);
     expect(res.ok === false && res.reason).toMatch(/maxUsd/);
   });
 
-  it("fails exactly at the node-run ceiling", () => {
-    const res = checkBudget(makeState({ spent: { usd: 0, wallClockSec: 0, nodeRuns: 5 } }));
+  it("fails just over the node-run ceiling", () => {
+    const res = checkBudget(makeState({ spent: { usd: 0, wallClockSec: 0, nodeRuns: 6 } }));
     expect(res.ok).toBe(false);
     expect(res.ok === false && res.reason).toMatch(/maxNodeRuns/);
+  });
+
+  it("passes at exactly the wall-clock ceiling (exclusive)", () => {
+    const now = Date.now();
+    const createdAt = new Date(now - 60_000).toISOString();
+    const res = checkBudget(makeState({ createdAt }), now);
+    expect(res.ok).toBe(true);
   });
 
   it("fails exactly at the wall-clock ceiling measured from createdAt", () => {
