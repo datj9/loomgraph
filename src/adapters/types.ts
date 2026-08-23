@@ -22,6 +22,16 @@ export interface Adapter {
   run(input: AdapterInput): Promise<AdapterOutput>;
 }
 
+/**
+ * A reported price is only usable if it is a finite, non-negative number. A
+ * negative report would drive the run budget backwards and let a run outlive
+ * its ceiling, so it is treated as 0 rather than trusted.
+ */
+export function clampCostUsd(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return 0;
+  return value;
+}
+
 export interface ProcessRunOptions {
   cwd: string;
   timeoutSec: number;

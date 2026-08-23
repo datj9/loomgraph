@@ -1,4 +1,4 @@
-import { execa } from "execa";
+import { clampCostUsd, runProcess } from "./types.js";
 import type { Adapter, AdapterInput, AdapterOutput } from "./types.js";
 
 /**
@@ -62,7 +62,9 @@ export function parseOpencodeJsonl(stdout: string, exitCode: number | null): Ada
   for (const event of events) {
     const part = event.part;
     if (event.type === "text" && part && typeof part.text === "string") text += part.text;
-    if (part && typeof part.cost === "number") costUsd += part.cost;
+    // A negative or non-finite reported price contributes 0 - it must never
+    // drive the run budget backwards.
+    if (part) costUsd += clampCostUsd(part.cost);
   }
 
   if (events.length === 0) {
@@ -83,16 +85,18 @@ export class OpenCodeAdapter implements Adapter {
   constructor(private readonly bin = "opencode") {}
 
   async run(input: AdapterInput): Promise<AdapterOutput> {
-    const result = await execa(this.bin, buildOpencodeArgs(input.prompt, input.model), {
+    const result = await runProcess(this.bin, buildOpencodeArgs(input.prompt, input.model), {
       cwd: input.cwd,
-      timeout: input.timeoutSec * 1000,
-      reject: false,
-      // Keep the run non-interactive - an open stdin can stall the CLI.
-      input: "",
+      timeoutSec: input.timeoutSec,
     });
 
-    const stdout = typeof result.stdout === "string" ? result.stdout : "";
-    const stderr = typeof result.stderr === "string" ? result.stderr : "";
+    const { stdout, stderr } = result;
+
+    // Name the binary rather than letting the empty stdout surface as a parse
+    // failure - the same shape lg-handoff uses.
+    if (result.spawnErrorCode === "ENOENT") {
+      return { ok: false, text: "", costUsd: 0, raw: stdout, error: `${this.bin} not found on PATH` };
+    }
 
     if (result.timedOut) {
       return { ok: false, text: stdout, costUsd: 0, raw: { stdout, stderr }, error: `timeout after ${input.timeoutSec}s` };

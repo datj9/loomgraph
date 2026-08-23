@@ -1,5 +1,8 @@
-import { describe, it, expect } from "vitest";
-import { buildClaudeArgs, parseClaudeJson } from "./claude.js";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { buildClaudeArgs, parseClaudeJson, ClaudeAdapter } from "./claude.js";
 
 const SUCCESS = `{"type":"result","subtype":"success","result":"done","session_id":"abc","num_turns":3,"total_cost_usd":0.0787}`;
 const MAX_TURNS = `{"type":"result","subtype":"error_max_turns","result":"","total_cost_usd":0.5}`;
@@ -147,4 +150,48 @@ describe("parseClaudeJson", () => {
     expect(Array.isArray(out.raw)).toBe(true);
     expect((out.raw as unknown[]).length).toBe(4);
   });
+
+  it("clamps a negative total_cost_usd to 0", () => {
+    const out = parseClaudeJson(`{"subtype":"success","result":"ok","total_cost_usd":-1.5}`);
+    expect(out.ok).toBe(true);
+    expect(out.costUsd).toBe(0);
+  });
+
+  it("clamps a non-finite total_cost_usd to 0", () => {
+    const out = parseClaudeJson(`{"subtype":"success","result":"ok","total_cost_usd":1e999}`);
+    expect(out.costUsd).toBe(0);
+  });
+});
+
+describe("ClaudeAdapter process handling", () => {
+  // Every test here points the adapter at a throwaway stub script by absolute
+  // path. No real agent CLI is ever spawned and PATH is never touched.
+  let dir: string;
+
+  beforeAll(async () => {
+    dir = await mkdtemp(join(tmpdir(), "lg-claude-stub-"));
+  });
+
+  afterAll(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("names the binary when it is missing instead of blaming the json parser", async () => {
+    const bin = join(dir, "definitely-not-installed");
+    const out = await new ClaudeAdapter(bin).run({ prompt: "hi", cwd: dir, timeoutSec: 10 });
+    expect(out.ok).toBe(false);
+    expect(out.error).toContain(bin);
+    expect(out.error).toMatch(/not found on PATH/);
+    expect(out.error).not.toMatch(/could not parse/);
+  });
+
+  it("times out when a grandchild outlives the CLI", async () => {
+    const bin = join(dir, "slow-stub.sh");
+    await writeFile(bin, `#!/bin/sh\nsleep 30 &\necho '{"subtype":"success","result":"ok"}'\n`, { mode: 0o755 });
+    const started = Date.now();
+    const out = await new ClaudeAdapter(bin).run({ prompt: "hi", cwd: dir, timeoutSec: 2 });
+    expect(out.ok).toBe(false);
+    expect(out.error).toMatch(/timeout after 2s/);
+    expect(Date.now() - started).toBeLessThan(3500);
+  }, 20000);
 });
