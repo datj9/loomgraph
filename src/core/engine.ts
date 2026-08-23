@@ -353,7 +353,18 @@ export async function execute(graph: Graph, initial: RunState, deps: EngineDeps)
     if (unanswered.length > 0) {
       for (const id of unanswered) {
         const def = graph.nodes[id]!;
-        emit({ kind: "human_requested", nodeId: id, data: { question: def.type === "human" ? def.question : "" } });
+        let question: string;
+        try {
+          // M5: the question shown to a reviewer is a template like any other -
+          // resolve {{vars.*}} and {{nodes.*.output}} exactly like agent prompts.
+          question = interpolate(def.type === "human" ? def.question : "", state);
+        } catch (err) {
+          // M2: an unresolvable reference is deterministic, so pausing with a
+          // broken question would strand the run. Fail through the normal path.
+          if (err instanceof TemplateError) return finish("failed", err.message);
+          throw err;
+        }
+        emit({ kind: "human_requested", nodeId: id, data: { question } });
       }
       state.status = "paused";
       state = store.save(state);

@@ -390,6 +390,54 @@ edges:
     expect(log.read("run1").filter((e) => e.kind === "human_resolved")).toHaveLength(1);
   });
 
+  it("interpolates vars and upstream node output into a human node's question", async () => {
+    const src = `
+name: gated-q
+budget: { maxUsd: 10, maxWallClockSec: 600, maxNodeRuns: 20 }
+nodes:
+  pre: { type: command, run: "echo summarized" }
+  h: { type: human, question: "Review {{vars.ticket}} - upstream says: {{nodes.pre.output}} - ship it?" }
+  b: { type: command, run: "echo b" }
+edges:
+  - { from: pre, to: h }
+  - { from: h, to: b }
+  - { from: b, to: END }
+`;
+    const seen: string[] = [];
+    const registry = { command: stub("command", (i) => { seen.push(i.prompt); return ok(i.prompt.startsWith("echo summar") ? "summarized" : i.prompt); }) };
+
+    const paused = await execute(parseGraph(src), start(src, "run1", { ticket: "LG-42" }), deps(registry));
+
+    expect(paused.status).toBe("paused");
+    const requested = log.read("run1").filter((e) => e.kind === "human_requested");
+    expect(requested).toHaveLength(1);
+    // M5: the question a reviewer sees must have its templates resolved, not raw
+    // {{nodes.pre.output}} placeholders.
+    expect(requested[0]!.data.question).toBe("Review LG-42 - upstream says: summarized - ship it?");
+  });
+
+  it("fails the run when a human node's question references an unknown template", async () => {
+    const src = `
+name: gated-q
+budget: { maxUsd: 10, maxWallClockSec: 600, maxNodeRuns: 20 }
+nodes:
+  h: { type: human, question: "Approve {{vars.nope}}?" }
+edges:
+  - { from: h, to: END }
+`;
+    const registry = { command: stub("command", () => ok("")) };
+
+    const final = await execute(parseGraph(src), start(src), deps(registry));
+
+    // Not stranded at paused with a broken question: the unresolvable reference
+    // is deterministic, so the run fails through the normal path.
+    expect(final.status).toBe("failed");
+    expect(store.load("run1")!.status).toBe("failed");
+    const finished = log.read("run1").find((e) => e.kind === "run_finished");
+    expect(finished).toBeDefined();
+    expect(finished!.data.error).toMatch(/nope/);
+  });
+
   it("fails with a deadlock when nothing is ready and END was never reached", async () => {
     const src = `
 name: stuck
