@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, mkdirSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseGraph } from "./graph.js";
@@ -9,6 +9,7 @@ import { execute, newRunState, interpolate, readySet, containsPassToken, EngineE
 import * as engine from "./engine.js";
 import type { EngineDeps } from "./engine.js";
 import type { Adapter, AdapterInput, AdapterOutput } from "../adapters/types.js";
+import { CommandAdapter } from "../adapters/command.js";
 import type { RunState } from "./types.js";
 
 function ok(text: string, costUsd = 0): AdapterOutput {
@@ -504,11 +505,60 @@ edges:
     const registry = { command: stub("command", (i) => ok(i.prompt)) };
     const final = await execute(parseGraph(src), start(src), deps(registry));
 
-    // H3: ceilings are exclusive, so maxNodeRuns 2 permits runs 1 and 2. The
-    // third node still overshoots and stops the run. C2 tightens this further
-    // by refusing to dispatch node c at all.
-    expect(final.spent.nodeRuns).toBe(3);
+    // H3: ceilings are exclusive, so maxNodeRuns 2 permits runs 1 and 2. C2
+    // goes further and refuses to dispatch node c at all, so the recorded
+    // spend stays exactly at the ceiling instead of overshooting to 3.
+    expect(final.spent.nodeRuns).toBe(2);
+    expect(final.nodes.c).toBeUndefined();
     expect(final.status).toBe("failed");
+    const exceeded = log.read("run1").filter((e) => e.kind === "budget_exceeded");
+    expect(exceeded).toHaveLength(1);
+    expect(String(exceeded[0]!.data.reason)).toMatch(/maxNodeRuns/);
+  });
+
+  it("refuses to dispatch the fan-out nodes that would exceed maxNodeRuns, leaving no side effects (C2)", async () => {
+    const sent = join(dir, "sent");
+    mkdirSync(sent);
+
+    const src = `
+name: c2-admission
+budget: { maxUsd: 999, maxWallClockSec: 999999, maxNodeRuns: 2 }
+nodes:
+  root: { type: command, run: "touch sent/root" }
+  a: { type: command, run: "touch sent/a" }
+  b: { type: command, run: "touch sent/b" }
+  c: { type: command, run: "touch sent/c" }
+  d: { type: command, run: "touch sent/d" }
+edges:
+  - { from: root, to: [a, b, c, d] }
+  - { from: [a, b, c, d], to: END }
+`;
+    // Real command adapter: command nodes spawn `touch` inside the temporary
+    // directory (never an agent CLI), so side effects really land on disk.
+    const registry = { command: new CommandAdapter() };
+
+    const final = await execute(parseGraph(src), start(src, "c2-run"), deps(registry));
+
+    expect(final.status).toBe("failed");
+    expect(final.spent.nodeRuns).toBe(2);
+    expect(existsSync(join(sent, "root"))).toBe(true);
+
+    // Proof that three of the four fan-out nodes were never dispatched: the
+    // sent directory holds exactly two entries, and only one of a/d-d exists.
+    const entries = readdirSync(sent);
+    expect(entries).toHaveLength(2);
+    expect(entries).toContain("root");
+    const survivor = entries.find((f) => f !== "root");
+    expect(survivor).toBeDefined();
+    expect(["a", "b", "c", "d"]).toContain(survivor);
+    for (const name of ["a", "b", "c", "d"]) {
+      expect(existsSync(join(sent, name))).toBe(name === survivor);
+    }
+
+    const exceeded = log.read("c2-run").filter((e) => e.kind === "budget_exceeded");
+    expect(exceeded).toHaveLength(1);
+    expect(String(exceeded[0]!.data.reason)).toMatch(/maxNodeRuns/);
+    expect((exceeded[0]!.data.spent as { nodeRuns: number }).nodeRuns).toBe(2);
   });
 
   it("fails a run whose final spend exceeds the usd ceiling", async () => {

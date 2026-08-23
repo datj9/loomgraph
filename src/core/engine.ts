@@ -327,9 +327,26 @@ export async function execute(graph: Graph, initial: RunState, deps: EngineDeps)
 
     const batch = ready.filter((id) => graph.nodes[id]!.type !== "human");
     if (batch.length > 0) {
-      // Fan-out: the whole ready set runs concurrently, checkpointing as each lands.
+      // Admission pass: maxNodeRuns must bound work, not just batch boundaries.
+      // Project the spend one node at a time and ask checkBudget before each
+      // dispatch, so a node whose run would push the spent node-run count over
+      // the ceiling is never dispatched and leaves no side effect. Everything
+      // admitted still runs concurrently, checkpointing as each lands.
+      let projection = state;
+      const admitted: string[] = [];
+      let budgetStopReason: string | null = null;
+      for (const id of batch) {
+        projection = recordSpend(projection, { usd: 0, nodeRuns: 1 });
+        const admission = checkBudget(projection);
+        if (!admission.ok) {
+          budgetStopReason = admission.reason;
+          break;
+        }
+        admitted.push(id);
+      }
+
       const results = await Promise.all(
-        batch.map(async (id) => {
+        admitted.map(async (id) => {
           const result = await executeNode(id, graph.nodes[id]!);
           commit(result);
           return result;
@@ -340,6 +357,11 @@ export async function execute(graph: Graph, initial: RunState, deps: EngineDeps)
       if (failed.length > 0) {
         const detail = failed.map((r) => `${r.nodeId}: ${r.error}`).join("; ");
         return finish("failed", `node failed after ${failed[0]!.attempts} attempt(s) - ${detail}`);
+      }
+
+      if (budgetStopReason !== null) {
+        emit({ kind: "budget_exceeded", data: { reason: budgetStopReason, spent: state.spent, budget: state.budget } });
+        return finish("failed", budgetStopReason);
       }
     }
   }
