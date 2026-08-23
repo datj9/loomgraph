@@ -250,6 +250,50 @@ edges:
     expect(() => parseGraph(src)).toThrow(/model/);
   });
 
+  it("rejects a command node that declares an adapter", () => {
+    const src = graph(`nodes:
+  a:
+    type: command
+    run: "echo hi"
+    adapter: claude
+edges:
+  - from: a
+    to: END
+`);
+    expect(() => parseGraph(src)).toThrow(/a/);
+    expect(() => parseGraph(src)).toThrow(/adapter/);
+  });
+
+  it("rejects a human node that declares an adapter", () => {
+    const src = graph(`nodes:
+  a:
+    type: human
+    question: "ok?"
+    adapter: claude
+edges:
+  - from: a
+    to: END
+`);
+    expect(() => parseGraph(src)).toThrow(/a/);
+    expect(() => parseGraph(src)).toThrow(/adapter/);
+  });
+
+  it("accepts an agent node with an explicit adapter", () => {
+    const src = graph(`nodes:
+  a:
+    type: agent
+    adapter: claude
+    prompt: "hi"
+edges:
+  - from: a
+    to: END
+`);
+    const parsed = parseGraph(src);
+    const node = parsed.nodes["a"];
+    expect(node?.type).toBe("agent");
+    if (node?.type === "agent") expect(node.adapter).toBe("claude");
+  });
+
   it("rejects an agent node with an unknown adapter", () => {
     const src = graph(`nodes:
   a:

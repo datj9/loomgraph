@@ -153,11 +153,14 @@ export function parseGraph(source: string, sourceName = "graph"): Graph {
     if (typeof type !== "string" || !(NODE_TYPES as readonly string[]).includes(type)) {
       fail(`node "${id}" has unknown type "${String(type)}" - valid types are ${NODE_TYPES.join(", ")}`);
     }
-    // zod strips unknown keys, so a `model` on a command or human node would
-    // vanish silently rather than fail. Only the two node types that dispatch a
-    // prompt to an agent CLI can carry one.
+    // zod strips unknown keys, so a `model` or `adapter` on a command or human
+    // node would vanish silently rather than fail. Only the two node types that
+    // dispatch a prompt to an agent CLI can carry either.
     if ((value as Record<string, unknown>).model !== undefined && type !== "agent" && type !== "verifier") {
       fail(`node "${id}" of type "${type}" cannot declare a model - only agent and verifier nodes dispatch to an adapter`);
+    }
+    if ((value as Record<string, unknown>).adapter !== undefined && type !== "agent" && type !== "verifier") {
+      fail(`node "${id}" of type "${type}" cannot declare a adapter - only agent and verifier nodes dispatch to an adapter`);
     }
     const parsed = nodeSchema.safeParse(value);
     if (!parsed.success) fail(issuesToMessage(`node "${id}"`, parsed.error));
