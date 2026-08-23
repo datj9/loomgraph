@@ -1,5 +1,10 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { delimiter, dirname, join } from "node:path";
+import { CheckpointStore } from "../core/store.js";
 import { escapeHtml, renderReportHtml } from "./render.js";
+import { reportCommand } from "./report.js";
 import type { LgEvent } from "../core/events.js";
 import type { RunState } from "../core/types.js";
 
@@ -106,5 +111,112 @@ describe("renderReportHtml", () => {
     expect(out).toContain("node_started");
     expect(out).toContain("node_finished");
     expect(out).toContain("run_finished");
+  });
+});
+
+describe("reportCommand --publish", () => {
+  const runId = "demo-20260814-120000-ab12";
+  const title = `loomgraph run ${runId}`;
+  const pushJson = JSON.stringify({
+    artifactId: "art-1",
+    versionId: "v1",
+    versionNo: 1,
+    viewUrl: "https://enclave.example/v/1",
+    uploaded: [],
+    skipped: [],
+  });
+
+  let work: string;
+  let fakeBin: string;
+  let capturedDir: string;
+  let capturedListing: string;
+  let originalCwd: string;
+  let originalPath: string | undefined;
+
+  beforeEach(() => {
+    work = mkdtempSync(join(tmpdir(), "lg-report-work-"));
+    fakeBin = mkdtempSync(join(tmpdir(), "lg-report-bin-"));
+    capturedDir = join(fakeBin, "dir.txt");
+    capturedListing = join(fakeBin, "listing.txt");
+    originalCwd = process.cwd();
+    originalPath = process.env.PATH;
+    process.chdir(work);
+
+    // A real run record, so reportCommand can find the run.
+    new CheckpointStore(join(work, ".loomgraph", "runs")).save(makeState());
+
+    // Decoys sitting in the working directory: the exact files that must never
+    // be uploaded when --publish is used.
+    writeFileSync(join(work, "hello.yaml"), "graph: {}\n", "utf8");
+    mkdirSync(join(work, ".loomgraph", "secrets"), { recursive: true });
+    writeFileSync(join(work, ".loomgraph", "secrets", "token.txt"), "token", "utf8");
+    writeFileSync(join(work, "other-report.html"), "<html>old</html>", "utf8");
+
+    // FAKE enclave: a stub script that records the directory it is told to
+    // publish and the listing of that directory, then answers like the real
+    // binary would. The real enclave on the host PATH is never touched.
+    const stub = join(fakeBin, "enclave");
+    writeFileSync(
+      stub,
+      [
+        "#!/bin/sh",
+        `printf '%s\\n' "$2" > "${capturedDir}"`,
+        `ls -A "$2" > "${capturedListing}"`,
+        `printf '%s' '${pushJson}'`,
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    chmodSync(stub, 0o755);
+    process.env.PATH = `${fakeBin}${delimiter}${originalPath}`;
+  });
+
+  afterEach(() => {
+    process.chdir(originalCwd);
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+    rmSync(work, { recursive: true, force: true });
+    rmSync(fakeBin, { recursive: true, force: true });
+  });
+
+  it("publishes only the generated report, never the working directory", async () => {
+    const out = join(work, "r1.html");
+    const code = await reportCommand(runId, { out, publish: true, title });
+
+    expect(code).toBe(0);
+    expect(existsSync(out)).toBe(true);
+
+    // The directory handed to the publisher must be neither the working
+    // directory nor the report's own parent (they are the same dir here).
+    const pushedDir = readFileSync(capturedDir, "utf8").trim();
+    expect(pushedDir).not.toBe(work);
+    expect(pushedDir).not.toBe(dirname(out));
+
+    // And it must contain exactly one entry: the report itself, none of the
+    // decoys (hello.yaml, .loomgraph/…, other-report.html).
+    const listing = readFileSync(capturedListing, "utf8")
+      .split("\n")
+      .filter((l) => l !== "");
+    expect(listing).toEqual(["r1.html"]);
+  });
+
+  it("removes the staging directory after publishing", async () => {
+    const out = join(work, "r1.html");
+    const code = await reportCommand(runId, { out, publish: true, title });
+
+    expect(code).toBe(0);
+    const pushedDir = readFileSync(capturedDir, "utf8").trim();
+    expect(pushedDir).not.toBe(work);
+    expect(existsSync(pushedDir)).toBe(false);
+  });
+
+  it("does not call the publisher at all without --publish", async () => {
+    const out = join(work, "r1.html");
+    const code = await reportCommand(runId, { out, title });
+
+    expect(code).toBe(0);
+    expect(existsSync(out)).toBe(true);
+    // The fake stub records nothing: never invoked.
+    expect(existsSync(capturedDir)).toBe(false);
   });
 });
