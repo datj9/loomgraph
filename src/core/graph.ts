@@ -110,6 +110,42 @@ function asList(value: unknown, where: string): string[] {
   return fail(`${where} must be a node id or a list of node ids`);
 }
 
+/**
+ * The same `{{...}}` grammar the engine's `interpolate` resolver accepts:
+ * a bare shorthand `{{x}}` (meaning `{{vars.x}}`), `{{vars.x}}`, or
+ * `{{nodes.<id>.output}}`. Anything else, or a `nodes.<id>.output` reference
+ * to an undeclared node id, is a static validation error.
+ *
+ * Var references are deliberately NOT checked against the graph's `vars:`
+ * block: `lg run --var name=value` injects vars at runtime that the block
+ * never declares, so an undeclared var is not statically decidable. Only node
+ * ids, which come exclusively from the graph itself, are load-time decidable.
+ */
+const templateRefPattern = /\{\{\s*([A-Za-z0-9_.\-]+)\s*\}\}/g;
+
+function checkTemplateReferences(nodes: Record<string, NodeDef>): void {
+  for (const [id, def] of Object.entries(nodes)) {
+    const template =
+      def.type === "command" ? def.run : def.type === "agent" || def.type === "verifier" ? def.prompt : null;
+    if (template === null) continue;
+    for (const match of template.matchAll(templateRefPattern)) {
+      const ref = match[1]!;
+      const parts = ref.split(".");
+      let ok: boolean;
+      if (parts.length === 1) {
+        ok = true;
+      } else if (parts[0] === "vars" && parts.length === 2) {
+        ok = true;
+      } else if (parts[0] === "nodes" && parts.length === 3 && parts[2] === "output") {
+        ok = parts[1]! in nodes;
+      } else {
+        ok = false;
+      }
+      if (!ok) fail(`node "${id}": unknown template reference "{{${ref}}}"`);
+    }
+  }
+}
+
 /** Parse a graph from YAML text and validate it structurally. */
 export function parseGraph(source: string, sourceName = "graph"): Graph {
   let raw: unknown;
@@ -160,13 +196,14 @@ export function parseGraph(source: string, sourceName = "graph"): Graph {
       fail(`node "${id}" of type "${type}" cannot declare a model - only agent and verifier nodes dispatch to an adapter`);
     }
     if ((value as Record<string, unknown>).adapter !== undefined && type !== "agent" && type !== "verifier") {
-      fail(`node "${id}" of type "${type}" cannot declare a adapter - only agent and verifier nodes dispatch to an adapter`);
+      fail(`node "${id}" of type "${type}" cannot declare an adapter - only agent and verifier nodes dispatch to an adapter`);
     }
     const parsed = nodeSchema.safeParse(value);
     if (!parsed.success) fail(issuesToMessage(`node "${id}"`, parsed.error));
     nodes[id] = parsed.data;
   }
   if (Object.keys(nodes).length === 0) fail("graph has no nodes");
+  checkTemplateReferences(nodes);
 
   const rawEdges = doc.edges;
   if (!Array.isArray(rawEdges) || rawEdges.length === 0) fail("edges is required and must be a non-empty list");
