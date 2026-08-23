@@ -60,6 +60,8 @@ describe("SCAN_RULES", () => {
       "huggingface-token",
       "google-oauth-secret",
       "auth-header",
+      "netrc-credentials",
+      "auth-json-credential",
       "abs-home-path",
     ]);
   });
@@ -169,6 +171,35 @@ describe("scanText — hits and near-misses per rule", () => {
     expect(fires("Authorization: " + "Bearer", "auth-header")).toBe(false);
   });
 
+  it("auth-header also matches the JSON-quoted form", () => {
+    const jsonBearer = '{"Authorization":"' + "Bearer " + shaped("FAKE", "faketoken0000") + '"}';
+    const jsonBasic = '{"Authorization": "' + "Basic " + shaped("dXNl", "cjpwYXNz") + '"}';
+    expect(fires(jsonBearer, "auth-header")).toBe(true);
+    expect(fires(jsonBasic, "auth-header")).toBe(true);
+    // The plain-text form must keep working.
+    expect(fires("Authorization: " + "Bearer " + shaped("FAKE", "faketoken0000"), "auth-header")).toBe(true);
+    // Scheme with no credential is still not a finding.
+    expect(fires('{"Authorization":"' + 'Bearer"}', "auth-header")).toBe(false);
+  });
+
+  it("netrc-credentials", () => {
+    const row = "machine api.example.com login alice password " + shaped("FAKE", "fakesecret0000");
+    expect(fires(row, "netrc-credentials")).toBe(true);
+    expect(fires("  machine gitlab.example.com login bot password " + shaped("FAKE", "fakesecret0000"), "netrc-credentials")).toBe(true);
+    // Prose that merely mentions the words is not a .netrc row.
+    expect(fires("the machine has a login and a password", "netrc-credentials")).toBe(false);
+    expect(fires("machine api.example.com login alice", "netrc-credentials")).toBe(false);
+  });
+
+  it("auth-json-credential covers opencode auth.json shapes", () => {
+    expect(fires('{"refresh":"' + shaped("FAKE", "fakerefresh0000") + '"}', "auth-json-credential")).toBe(true);
+    expect(fires('{"access": "' + shaped("FAKE", "fakeaccess0000") + '"}', "auth-json-credential")).toBe(true);
+    expect(fires('{"credential":"' + shaped("FAKE", "fakecred0000") + '"}', "auth-json-credential")).toBe(true);
+    // Empty value is a placeholder, and prose is not a JSON credential.
+    expect(fires('{"access":""}', "auth-json-credential")).toBe(false);
+    expect(fires("refresh the access credential in the browser", "auth-json-credential")).toBe(false);
+  });
+
   it("env-assignment is case-insensitive and covers a json key", () => {
     expect(fires("database_password=hunter2xyz", "env-assignment")).toBe(true);
     expect(fires('"password": "hunter2xyz"', "env-assignment")).toBe(true);
@@ -224,6 +255,16 @@ describe("scanText — shape of a finding", () => {
       expect(finding.excerpt).not.toContain("FAKEfake");
     }
     expect(JSON.stringify(findings)).not.toContain("FAKEfake");
+  });
+
+  it("masks the excerpt of the new credential shapes", () => {
+    const row = "machine api.example.com login alice password " + shaped("FAKE", "fakesecret0000");
+    const netrc = scanText(row, "f.md").find((f) => f.rule === "netrc-credentials");
+    expect(netrc?.excerpt).toBe("mach...");
+    const json = '{"refresh":"' + shaped("FAKE", "fakerefresh0000") + '"}';
+    const hit = scanText(json, "f.md").find((f) => f.rule === "auth-json-credential");
+    expect(hit?.excerpt.length).toBeLessThanOrEqual(7);
+    expect(hit?.excerpt).not.toContain("fakerefresh");
   });
 
   it("reports 1-based line numbers and echoes the file back", () => {

@@ -126,8 +126,24 @@ export const SCAN_RULES: ReadonlyArray<{
   },
   {
     name: "auth-header",
-    pattern: /\bAuthorization\s*:\s*(?:Bearer|Basic)\s+\S+/i,
+    // Optional quotes around the name and the scheme cover the JSON-encoded
+    // form of the same header, e.g. `{"Authorization":"Bearer ..."}`.
+    pattern: /\bAuthorization"?\s*:\s*"?(?:Bearer|Basic)\s+\S+/i,
     description: "Authorization Bearer or Basic header",
+  },
+  {
+    name: "netrc-credentials",
+    // A .netrc row is space-separated with no `=` or `:`, so no assignment rule
+    // can see it. Requiring all three keywords in order keeps prose out.
+    pattern: /\bmachine\s+\S+\s+login\s+\S+\s+password\s+\S+/i,
+    description: ".netrc machine/login/password row",
+  },
+  {
+    name: "auth-json-credential",
+    // The shapes an opencode auth.json uses for stored OAuth material. The key
+    // must be JSON-quoted and the value non-empty, so prose cannot fire.
+    pattern: /"(?:refresh|access|credential)"\s*:\s*"[^"\s]+"/i,
+    description: "OAuth refresh/access/credential value in a JSON auth file",
   },
   {
     name: "abs-home-path",
