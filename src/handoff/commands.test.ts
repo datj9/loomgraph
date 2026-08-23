@@ -600,4 +600,31 @@ describe("packCommand", () => {
     expect(code).toBe(1);
     expect(lines).toContain("no such session");
   });
+
+  it("drops a non-repo-relative path from files.txt and says so", async () => {
+    // files.txt is a repo-relative manifest. A bare absolute path outside the
+    // repo leaks the host filesystem layout, so it must not survive into the
+    // bundle - and dropping it silently is just as bad, because the author
+    // cannot tell the manifest is incomplete.
+    const work = tempDir();
+    const sessionFile = join(work, "session.jsonl");
+    writeFileSync(
+      sessionFile,
+      [
+        `{"type":"user","sessionId":"sess-9","cwd":"/repo/demo","message":{"role":"user","content":"read /opt/vendor/data/config.json then patch src/app.ts"}}`,
+      ].join("\n"),
+      "utf8",
+    );
+    const out = join(work, "bundle");
+    const fake = gitExec();
+    const { log, lines } = collector();
+
+    const code = await packCommand({ adapter: "claude", cwd: work, sessionFile, out }, fake.exec, log);
+
+    expect(code).toBe(0);
+    const filesTxt = readFileSync(join(out, "files.txt"), "utf8");
+    expect(filesTxt).not.toContain("/opt/vendor/data/config.json");
+    expect(filesTxt).toContain("src/app.ts");
+    expect(lines.some((l) => l.includes("/opt/vendor/data/config.json"))).toBe(true);
+  });
 });
