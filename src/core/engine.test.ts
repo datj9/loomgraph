@@ -1,14 +1,15 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, mkdirSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseGraph } from "./graph.js";
 import { CheckpointStore } from "./store.js";
 import { EventLog } from "./events.js";
-import { execute, newRunState, interpolate, readySet, EngineError } from "./engine.js";
+import { execute, newRunState, interpolate, readySet, containsPassToken, EngineError } from "./engine.js";
 import * as engine from "./engine.js";
 import type { EngineDeps } from "./engine.js";
 import type { Adapter, AdapterInput, AdapterOutput } from "../adapters/types.js";
+import { CommandAdapter } from "../adapters/command.js";
 import type { RunState } from "./types.js";
 
 function ok(text: string, costUsd = 0): AdapterOutput {
@@ -94,6 +95,10 @@ describe("interpolate", () => {
     expect(() => interpolate("{{vars.nope}}", start(LINEAR))).toThrow(/nope/);
   });
 
+  it("throws TemplateError so execute can catch an unresolvable reference", () => {
+    expect(() => interpolate("{{vars.nope}}", start(LINEAR))).toThrow(engine.TemplateError);
+  });
+
   it("resolves a node output whose id contains a hyphen", () => {
     const state = start(HYPHEN);
     state.nodes["my-node"] = {
@@ -169,6 +174,25 @@ describe("checkCommandExpectations", () => {
   });
 });
 
+describe("containsPassToken", () => {
+  it("matches a whole word but not a substring of a longer word", () => {
+    expect(containsPassToken("looks good - PASS", "PASS")).toBe(true);
+    expect(containsPassToken("PASS", "PASS")).toBe(true);
+    expect(containsPassToken("conclusion: PASS.", "PASS")).toBe(true);
+    expect(containsPassToken("(PASS)", "PASS")).toBe(true);
+    expect(containsPassToken("PASSWORD", "PASS")).toBe(false);
+    expect(containsPassToken("BYPASS", "PASS")).toBe(false);
+    expect(containsPassToken("xPASS", "PASS")).toBe(false);
+    expect(containsPassToken("PASSx", "PASS")).toBe(false);
+  });
+
+  it("matches the pass string literally, including regex metacharacters", () => {
+    expect(containsPassToken("status is ok? - done", "ok?")).toBe(true);
+    expect(containsPassToken("okay?", "ok?")).toBe(false);
+    expect(containsPassToken("[DONE]", "[DONE]")).toBe(true);
+  });
+});
+
 describe("execute", () => {
   it("runs a linear graph in order and succeeds", async () => {
     const order: string[] = [];
@@ -197,6 +221,57 @@ describe("execute", () => {
     // Each node observes the checkpoint left by its predecessors.
     expect(seen).toEqual([[], ["a"], ["a", "b"]]);
     expect(store.load("run1")!.completed).toEqual(["a", "b", "c"]);
+  });
+
+  it("accumulates node runs and spend across a resume", async () => {
+    const src = `
+name: acc
+budget: { maxUsd: 10, maxWallClockSec: 600, maxNodeRuns: 100 }
+nodes:
+  a: { type: command, run: "echo a" }
+  b: { type: command, run: "echo b" }
+  c: { type: command, run: "echo c" }
+  d: { type: command, run: "echo d" }
+  e: { type: command, run: "echo e" }
+edges:
+  - { from: a, to: b }
+  - { from: b, to: c }
+  - { from: c, to: d }
+  - { from: d, to: e }
+  - { from: e, to: END }
+`;
+    const graph = parseGraph(src);
+
+    // Segment one: a and b run, then the process is killed mid-c.
+    const killing = {
+      command: stub("command", (i) => {
+        if (i.prompt === "echo c") throw new Error("SENTINEL kill");
+        return ok(i.prompt, 0.25);
+      }),
+    };
+    await expect(execute(graph, start(src), deps(killing))).rejects.toThrow(/SENTINEL/);
+
+    const checkpoint = store.load("run1")!;
+    expect(checkpoint.completed).toEqual(["a", "b"]);
+    expect(checkpoint.spent.nodeRuns).toBe(2);
+    expect(checkpoint.spent.usd).toBeCloseTo(0.5, 10);
+
+    // The attempt that was in flight when the process died emitted a
+    // node_started but was never committed, so it is not billed. That gap -
+    // not a reset of the counters - is why an event count can run ahead of
+    // spent.nodeRuns across a kill/resume cycle.
+    expect(log.read("run1").filter((e) => e.kind === "node_started")).toHaveLength(3);
+
+    // Segment two: c, d and e run on the resumed checkpoint.
+    const working = { command: stub("command", (i) => ok(i.prompt, 0.25)) };
+    const final = await execute(graph, checkpoint, deps(working));
+
+    expect(final.status).toBe("succeeded");
+    // The counters are cumulative across both segments, the way wall-clock
+    // already is: 2 runs before the kill plus 3 after.
+    expect(final.spent.nodeRuns).toBe(5);
+    expect(final.spent.usd).toBeCloseTo(1.25, 10);
+    expect(store.load("run1")!.spent.nodeRuns).toBe(5);
   });
 
   it("resumes after a crash without re-running completed nodes", async () => {
@@ -366,6 +441,54 @@ edges:
     expect(log.read("run1").filter((e) => e.kind === "human_resolved")).toHaveLength(1);
   });
 
+  it("interpolates vars and upstream node output into a human node's question", async () => {
+    const src = `
+name: gated-q
+budget: { maxUsd: 10, maxWallClockSec: 600, maxNodeRuns: 20 }
+nodes:
+  pre: { type: command, run: "echo summarized" }
+  h: { type: human, question: "Review {{vars.ticket}} - upstream says: {{nodes.pre.output}} - ship it?" }
+  b: { type: command, run: "echo b" }
+edges:
+  - { from: pre, to: h }
+  - { from: h, to: b }
+  - { from: b, to: END }
+`;
+    const seen: string[] = [];
+    const registry = { command: stub("command", (i) => { seen.push(i.prompt); return ok(i.prompt.startsWith("echo summar") ? "summarized" : i.prompt); }) };
+
+    const paused = await execute(parseGraph(src), start(src, "run1", { ticket: "LG-42" }), deps(registry));
+
+    expect(paused.status).toBe("paused");
+    const requested = log.read("run1").filter((e) => e.kind === "human_requested");
+    expect(requested).toHaveLength(1);
+    // M5: the question a reviewer sees must have its templates resolved, not raw
+    // {{nodes.pre.output}} placeholders.
+    expect(requested[0]!.data.question).toBe("Review LG-42 - upstream says: summarized - ship it?");
+  });
+
+  it("fails the run when a human node's question references an unknown template", async () => {
+    const src = `
+name: gated-q
+budget: { maxUsd: 10, maxWallClockSec: 600, maxNodeRuns: 20 }
+nodes:
+  h: { type: human, question: "Approve {{vars.nope}}?" }
+edges:
+  - { from: h, to: END }
+`;
+    const registry = { command: stub("command", () => ok("")) };
+
+    const final = await execute(parseGraph(src), start(src), deps(registry));
+
+    // Not stranded at paused with a broken question: the unresolvable reference
+    // is deterministic, so the run fails through the normal path.
+    expect(final.status).toBe("failed");
+    expect(store.load("run1")!.status).toBe("failed");
+    const finished = log.read("run1").find((e) => e.kind === "run_finished");
+    expect(finished).toBeDefined();
+    expect(finished!.data.error).toMatch(/nope/);
+  });
+
   it("fails with a deadlock when nothing is ready and END was never reached", async () => {
     const src = `
 name: stuck
@@ -400,6 +523,28 @@ edges:
     const final = await execute(parseGraph(src), start(src, "fail-run"), deps(failing));
     expect(final.status).toBe("failed");
     expect(final.nodes.v!.error).toMatch(/PASS/);
+  });
+
+  it("does not let a substring of a longer word satisfy a verifier's pass string", async () => {
+    const src = `
+name: verify
+budget: { maxUsd: 10, maxWallClockSec: 600, maxNodeRuns: 20 }
+nodes:
+  v: { type: verifier, adapter: codex, prompt: "review", pass: "PASS" }
+edges:
+  - { from: v, to: END }
+`;
+    for (const output of ["password confirmed", "BYPASS every check", "xPASS", "PASSx", "mismatch: password"]) {
+      const registry = { codex: stub("codex", () => ok(output)) };
+      const final = await execute(parseGraph(src), start(src, `run-${output}`), deps(registry));
+      expect(final.status, `output "${output}" must fail`).toBe("failed");
+      expect(final.nodes.v!.error).toMatch(/did not report the pass string/);
+    }
+
+    const boundary = { codex: stub("codex", () => ok("PASS")) };
+    expect((await execute(parseGraph(src), start(src, "boundary-run"), deps(boundary))).status).toBe("succeeded");
+    const ending = { codex: stub("codex", () => ok("conclusion: PASS.")) };
+    expect((await execute(parseGraph(src), start(src, "ending-run"), deps(ending))).status).toBe("succeeded");
   });
 
   it("fails a command node whose output does not meet its expectations", async () => {
@@ -441,6 +586,37 @@ edges:
     expect(prompts).toEqual(["Reproduce LG-42", "Fix using out:1"]);
   });
 
+  it("fails the run through the normal path when a template reference cannot be resolved", async () => {
+    const src = `
+name: badref
+budget: { maxUsd: 10, maxWallClockSec: 600, maxNodeRuns: 20 }
+nodes:
+  a: { type: command, run: "echo {{nodes.nope.output}}", retries: 2 }
+edges:
+  - { from: a, to: END }
+`;
+    const seen: string[] = [];
+    const registry = { command: stub("command", (i) => { seen.push(i.prompt); return ok(i.prompt); }) };
+
+    const final = await execute(parseGraph(src), start(src), deps(registry));
+
+    // Not stranded: the run reaches a terminal failed status, persisted like any other.
+    expect(final.status).toBe("failed");
+    expect(store.load("run1")!.status).toBe("failed");
+    // The node failed through the normal path, so node_finished was emitted for it.
+    const nodeFinished = log.read("run1").filter((e) => e.kind === "node_finished" && e.nodeId === "a");
+    expect(nodeFinished).toHaveLength(1);
+    expect(nodeFinished[0]!.data.status).toBe("failed");
+    // run_finished was emitted for the run.
+    expect(log.read("run1").map((e) => e.kind)).toContain("run_finished");
+    // The recorded error names the unresolvable reference.
+    expect(final.nodes.a!.error).toMatch(/nope/);
+    // A template error is deterministic, so it must not be retried.
+    expect(final.nodes.a!.attempts).toBe(1);
+    // The adapter was never invoked for an unresolvable command template.
+    expect(seen).toEqual([]);
+  });
+
   it("refuses to execute a run that is already terminal", async () => {
     const state = start(LINEAR);
     state.status = "succeeded";
@@ -463,9 +639,88 @@ edges:
     const registry = { command: stub("command", (i) => ok(i.prompt)) };
     const final = await execute(parseGraph(src), start(src), deps(registry));
 
+    // H3: ceilings are exclusive, so maxNodeRuns 2 permits runs 1 and 2. C2
+    // goes further and refuses to dispatch node c at all, so the recorded
+    // spend stays exactly at the ceiling instead of overshooting to 3.
     expect(final.spent.nodeRuns).toBe(2);
-    expect(final.status).toBe("failed");
     expect(final.nodes.c).toBeUndefined();
+    expect(final.status).toBe("failed");
+    const exceeded = log.read("run1").filter((e) => e.kind === "budget_exceeded");
+    expect(exceeded).toHaveLength(1);
+    expect(String(exceeded[0]!.data.reason)).toMatch(/maxNodeRuns/);
+  });
+
+  it("refuses to dispatch the fan-out nodes that would exceed maxNodeRuns, leaving no side effects (C2)", async () => {
+    const sent = join(dir, "sent");
+    mkdirSync(sent);
+
+    const src = `
+name: c2-admission
+budget: { maxUsd: 999, maxWallClockSec: 999999, maxNodeRuns: 2 }
+nodes:
+  root: { type: command, run: "touch sent/root" }
+  a: { type: command, run: "touch sent/a" }
+  b: { type: command, run: "touch sent/b" }
+  c: { type: command, run: "touch sent/c" }
+  d: { type: command, run: "touch sent/d" }
+edges:
+  - { from: root, to: [a, b, c, d] }
+  - { from: [a, b, c, d], to: END }
+`;
+    // Real command adapter: command nodes spawn `touch` inside the temporary
+    // directory (never an agent CLI), so side effects really land on disk.
+    const registry = { command: new CommandAdapter() };
+
+    const final = await execute(parseGraph(src), start(src, "c2-run"), deps(registry));
+
+    expect(final.status).toBe("failed");
+    expect(final.spent.nodeRuns).toBe(2);
+    expect(existsSync(join(sent, "root"))).toBe(true);
+
+    // Proof that three of the four fan-out nodes were never dispatched: the
+    // sent directory holds exactly two entries, and only one of a/d-d exists.
+    const entries = readdirSync(sent);
+    expect(entries).toHaveLength(2);
+    expect(entries).toContain("root");
+    const survivor = entries.find((f) => f !== "root");
+    expect(survivor).toBeDefined();
+    expect(["a", "b", "c", "d"]).toContain(survivor);
+    for (const name of ["a", "b", "c", "d"]) {
+      expect(existsSync(join(sent, name))).toBe(name === survivor);
+    }
+
+    const exceeded = log.read("c2-run").filter((e) => e.kind === "budget_exceeded");
+    expect(exceeded).toHaveLength(1);
+    expect(String(exceeded[0]!.data.reason)).toMatch(/maxNodeRuns/);
+    expect((exceeded[0]!.data.spent as { nodeRuns: number }).nodeRuns).toBe(2);
+  });
+
+  it("refuses a retry attempt that would exceed maxNodeRuns, reporting budget_exceeded (C2 part B)", async () => {
+    const src = `
+name: c2b-retry
+budget: { maxUsd: 999, maxWallClockSec: 999999, maxNodeRuns: 2 }
+nodes:
+  a: { type: command, run: "always broken", retries: 2 }
+edges:
+  - { from: a, to: END }
+`;
+    // The node always fails, so with retries 2 it would normally make 3 attempts.
+    const registry = { command: stub("command", () => bad("still broken")) };
+    const final = await execute(parseGraph(src), start(src, "c2b-run"), deps(registry));
+
+    expect(final.status).toBe("failed");
+    expect(final.nodes.a!.status).toBe("failed");
+    // The second attempt is the last one the budget permits; the third is refused.
+    expect(final.nodes.a!.attempts).toBe(2);
+    expect(final.nodes.a!.attempts).not.toBe(3);
+    expect(final.nodes.a!.attempts).not.toBe(4);
+    const started = log.read("c2b-run").filter((e) => e.kind === "node_started" && e.nodeId === "a");
+    expect(started).toHaveLength(2);
+    expect(final.spent.nodeRuns).toBe(2);
+
+    const exceeded = log.read("c2b-run").filter((e) => e.kind === "budget_exceeded");
+    expect(exceeded).toHaveLength(1);
+    expect(String(exceeded[0]!.data.reason)).toMatch(/maxNodeRuns/);
   });
 
   it("fails a run whose final spend exceeds the usd ceiling", async () => {
@@ -555,7 +810,7 @@ edges:
     expect(log.read("run1").filter((e) => e.kind === "budget_exceeded")).toHaveLength(0);
   });
 
-  it("treats a final spend exactly at the usd ceiling as a breach", async () => {
+  it("treats a final spend exactly at the usd ceiling as within budget", async () => {
     const src = `
 name: exactly
 budget: { maxUsd: 0.30, maxWallClockSec: 600, maxNodeRuns: 20 }
@@ -572,10 +827,34 @@ edges:
 
     const final = await execute(parseGraph(src), start(src), deps(registry));
 
-    expect(final.status).toBe("failed");
+    // H3: ceilings are exclusive. Spending exactly maxUsd is permitted.
+    expect(final.status).toBe("succeeded");
+    expect(log.read("run1").filter((e) => e.kind === "budget_exceeded")).toHaveLength(0);
   });
 
-  it("fails a run whose final node-run count exceeds maxNodeRuns", async () => {
+  it("fails a run whose final spend is a cent over the usd ceiling", async () => {
+    const src = `
+name: overby
+budget: { maxUsd: 0.30, maxWallClockSec: 600, maxNodeRuns: 20 }
+nodes:
+  a: { type: command, run: "echo a" }
+  b: { type: command, run: "echo b" }
+edges:
+  - { from: a, to: b }
+  - { from: b, to: END }
+`;
+    const registry = {
+      command: stub("command", (i) => (i.prompt === "echo a" ? ok("a", 0.15) : ok("b", 0.16))),
+    };
+
+    const final = await execute(parseGraph(src), start(src), deps(registry));
+
+    expect(final.status).toBe("failed");
+    const exceeded = log.read("run1").filter((e) => e.kind === "budget_exceeded");
+    expect(String(exceeded[0]!.data.reason)).toMatch(/maxUsd/);
+  });
+
+  it("allows a run whose final node-run count is exactly maxNodeRuns", async () => {
     const src = `
 name: runcap
 budget: { maxUsd: 10, maxWallClockSec: 600, maxNodeRuns: 2 }
@@ -585,6 +864,51 @@ nodes:
 edges:
   - { from: a, to: b }
   - { from: b, to: END }
+`;
+    const registry = { command: stub("command", (i) => ok(i.prompt)) };
+
+    const final = await execute(parseGraph(src), start(src), deps(registry));
+
+    // H3: ceilings are exclusive, so maxNodeRuns 2 permits exactly 2 runs.
+    expect(final.status).toBe("succeeded");
+    expect(final.spent.nodeRuns).toBe(2);
+    expect(log.read("run1").filter((e) => e.kind === "budget_exceeded")).toHaveLength(0);
+  });
+
+  it("permits exactly maxNodeRuns node runs across a chain", async () => {
+    const src = `
+name: runcap-exact
+budget: { maxUsd: 10, maxWallClockSec: 600, maxNodeRuns: 3 }
+nodes:
+  a: { type: command, run: "echo a" }
+  b: { type: command, run: "echo b" }
+  c: { type: command, run: "echo c" }
+edges:
+  - { from: a, to: b }
+  - { from: b, to: c }
+  - { from: c, to: END }
+`;
+    const registry = { command: stub("command", (i) => ok(i.prompt)) };
+
+    const final = await execute(parseGraph(src), start(src), deps(registry));
+
+    expect(final.status).toBe("succeeded");
+    expect(final.spent.nodeRuns).toBe(3);
+    expect(final.nodes.c!.status).toBe("succeeded");
+  });
+
+  it("fails a run whose final node-run count exceeds maxNodeRuns", async () => {
+    const src = `
+name: runcap-over
+budget: { maxUsd: 10, maxWallClockSec: 600, maxNodeRuns: 2 }
+nodes:
+  a: { type: command, run: "echo a" }
+  b: { type: command, run: "echo b" }
+  c: { type: command, run: "echo c" }
+edges:
+  - { from: a, to: b }
+  - { from: b, to: c }
+  - { from: c, to: END }
 `;
     const registry = { command: stub("command", (i) => ok(i.prompt)) };
 

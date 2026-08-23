@@ -9,20 +9,20 @@ export function elapsedSec(state: RunState, now = Date.now()): number {
 }
 
 /**
- * Checked before every dispatch batch. Ceilings are inclusive: hitting the
- * limit exactly stops the run.
+ * Checked before every dispatch batch. Ceilings are exclusive: hitting the
+ * limit exactly is allowed, only going over stops the run.
  */
 export function checkBudget(state: RunState, now = Date.now()): BudgetCheck {
   const { budget, spent } = state;
 
-  if (spent.usd >= budget.maxUsd) {
+  if (spent.usd > budget.maxUsd) {
     return { ok: false, reason: `maxUsd exceeded: spent ${spent.usd} of ${budget.maxUsd} usd` };
   }
-  if (spent.nodeRuns >= budget.maxNodeRuns) {
+  if (spent.nodeRuns > budget.maxNodeRuns) {
     return { ok: false, reason: `maxNodeRuns exceeded: ran ${spent.nodeRuns} of ${budget.maxNodeRuns} nodes` };
   }
   const elapsed = elapsedSec(state, now);
-  if (elapsed >= budget.maxWallClockSec) {
+  if (elapsed > budget.maxWallClockSec) {
     return {
       ok: false,
       reason: `maxWallClockSec exceeded: ${Math.round(elapsed)}s elapsed of ${budget.maxWallClockSec}s`,

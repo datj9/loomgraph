@@ -14,6 +14,15 @@ export class EngineError extends Error {
   }
 }
 
+/**
+ * A template reference that cannot be resolved against the run state. Unlike
+ * transient adapter failures the error is deterministic: retrying would only
+ * burn attempts, so the engine fails the node instead of re-running it.
+ * Deliberately no own constructor: instances inherit EngineError's name, so
+ * code asserting the exact EngineError error keeps matching.
+ */
+export class TemplateError extends EngineError {}
+
 export interface EngineDeps {
   store: CheckpointStore;
   log: EventLog;
@@ -65,10 +74,10 @@ export function interpolate(template: string, state: RunState): string {
     } else if (parts[0] === "nodes" && parts.length === 3 && parts[2] === "output") {
       value = state.nodes[parts[1]!]?.output;
     } else {
-      throw new EngineError(`unknown template reference "{{${ref}}}"`);
+      throw new TemplateError(`unknown template reference "{{${ref}}}"`);
     }
 
-    if (value === undefined) throw new EngineError(`unknown template reference "{{${ref}}}"`);
+    if (value === undefined) throw new TemplateError(`unknown template reference "{{${ref}}}"`);
     return typeof value === "string" ? value : JSON.stringify(value);
   });
 }
@@ -124,6 +133,22 @@ export function checkCommandExpectations(
   return null;
 }
 
+/** Escape a literal string so it can appear inside a RegExp. */
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * True when `pass` appears in `text` as a whole token, not as a raw substring.
+ * The token must not be glued to word characters on either side, so "PASS"
+ * matches "looks good - PASS" but not "PASSWORD" or "BYPASS". The pass string
+ * itself is otherwise matched literally.
+ */
+export function containsPassToken(text: string, pass: string): boolean {
+  const boundary = "(?:^|[^A-Za-z0-9_])";
+  return new RegExp(`${boundary}${escapeRegExp(pass)}(?:$|[^A-Za-z0-9_])`).test(text);
+}
+
 /**
  * The batches the scheduler would dispatch, in order. Pure - used by
  * `lg run --dry-run`, which must not spawn anything.
@@ -170,6 +195,10 @@ export async function execute(graph: Graph, initial: RunState, deps: EngineDeps)
   const answers = deps.humanAnswers ?? {};
 
   let state = initial;
+  // Shared with the admission pass below: set by both the batch admission and
+  // a retry refused inside executeNode, and always consumed by the budget
+  // stop path (emit budget_exceeded + finish("failed", reason)).
+  let budgetStopReason: string | null = null;
   if (state.status === "succeeded" || state.status === "failed") {
     throw new EngineError(`run ${state.runId} is already ${state.status} and cannot be executed again`);
   }
@@ -201,10 +230,39 @@ export async function execute(graph: Graph, initial: RunState, deps: EngineDeps)
     let lastText = "";
 
     while (attempts < maxAttempts) {
+      // C2 part B: a retry is a node run like any other, so one must never be
+      // spent once the ceilings would be crossed. Check the budget before each
+      // attempt and stop retrying the moment it refuses. The first attempt of
+      // an admitted node always passes: part A already admitted it with a
+      // projection of one run, and attempts + 1 equals 1 here.
+      const projected = recordSpend(state, { usd: 0, nodeRuns: attempts + 1 });
+      const admission = checkBudget(projected);
+      if (!admission.ok) {
+        budgetStopReason = admission.reason;
+        lastError = admission.reason;
+        break;
+      }
+
       attempts += 1;
       emit({ kind: "node_started", nodeId: id, data: { attempt: attempts, type: def.type } });
 
-      const out = await runOnce(id, def);
+      let out: AdapterOutput;
+      try {
+        out = await runOnce(id, def);
+      } catch (err) {
+        // M2: an unresolvable template reference is deterministic, so retrying
+        // would only burn attempts. Fail the node through the engine's normal
+        // failure path (commit emits node_finished; the batch branch below
+        // emits run_finished and persists "failed") instead of stranding the
+        // run. Anything else keeps propagating as it does today.
+        if (err instanceof TemplateError) {
+          return {
+            nodeId: id, status: "failed", startedAt, endedAt: new Date().toISOString(),
+            attempts, output: lastText, error: err.message, costUsd,
+          };
+        }
+        throw err;
+      }
       costUsd += out.costUsd;
       lastText = out.text;
 
@@ -244,7 +302,7 @@ export async function execute(graph: Graph, initial: RunState, deps: EngineDeps)
       timeoutSec: def.timeoutSec,
     });
 
-    if (def.type === "verifier" && out.ok && !out.text.includes(def.pass)) {
+    if (def.type === "verifier" && out.ok && !containsPassToken(out.text, def.pass)) {
       return { ...out, ok: false, error: `verifier "${id}" did not report the pass string "${def.pass}"` };
     }
     return out;
@@ -295,7 +353,18 @@ export async function execute(graph: Graph, initial: RunState, deps: EngineDeps)
     if (unanswered.length > 0) {
       for (const id of unanswered) {
         const def = graph.nodes[id]!;
-        emit({ kind: "human_requested", nodeId: id, data: { question: def.type === "human" ? def.question : "" } });
+        let question: string;
+        try {
+          // M5: the question shown to a reviewer is a template like any other -
+          // resolve {{vars.*}} and {{nodes.*.output}} exactly like agent prompts.
+          question = interpolate(def.type === "human" ? def.question : "", state);
+        } catch (err) {
+          // M2: an unresolvable reference is deterministic, so pausing with a
+          // broken question would strand the run. Fail through the normal path.
+          if (err instanceof TemplateError) return finish("failed", err.message);
+          throw err;
+        }
+        emit({ kind: "human_requested", nodeId: id, data: { question } });
       }
       state.status = "paused";
       state = store.save(state);
@@ -311,9 +380,25 @@ export async function execute(graph: Graph, initial: RunState, deps: EngineDeps)
 
     const batch = ready.filter((id) => graph.nodes[id]!.type !== "human");
     if (batch.length > 0) {
-      // Fan-out: the whole ready set runs concurrently, checkpointing as each lands.
+      // Admission pass: maxNodeRuns must bound work, not just batch boundaries.
+      // Project the spend one node at a time and ask checkBudget before each
+      // dispatch, so a node whose run would push the spent node-run count over
+      // the ceiling is never dispatched and leaves no side effect. Everything
+      // admitted still runs concurrently, checkpointing as each lands.
+      let projection = state;
+      const admitted: string[] = [];
+      for (const id of batch) {
+        projection = recordSpend(projection, { usd: 0, nodeRuns: 1 });
+        const admission = checkBudget(projection);
+        if (!admission.ok) {
+          budgetStopReason = admission.reason;
+          break;
+        }
+        admitted.push(id);
+      }
+
       const results = await Promise.all(
-        batch.map(async (id) => {
+        admitted.map(async (id) => {
           const result = await executeNode(id, graph.nodes[id]!);
           commit(result);
           return result;
@@ -321,6 +406,12 @@ export async function execute(graph: Graph, initial: RunState, deps: EngineDeps)
       );
 
       const failed = results.filter((r) => r.status === "failed");
+      // C2 part B: a retry refused by the budget must surface as budget_exceeded,
+      // exactly like the part A admission stop, not as a generic node failure.
+      if (budgetStopReason !== null) {
+        emit({ kind: "budget_exceeded", data: { reason: budgetStopReason, spent: state.spent, budget: state.budget } });
+        return finish("failed", budgetStopReason);
+      }
       if (failed.length > 0) {
         const detail = failed.map((r) => `${r.nodeId}: ${r.error}`).join("; ");
         return finish("failed", `node failed after ${failed[0]!.attempts} attempt(s) - ${detail}`);
