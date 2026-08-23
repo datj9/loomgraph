@@ -29,6 +29,7 @@ import { parseCodexSessionJsonl } from "./readers/codex.js";
 import { buildOpencodeExportArgs, parseOpencodeExportJson } from "./readers/opencode.js";
 import { renderFilesTxt, renderHandoffHtml, renderHandoffMd } from "./render.js";
 import { rewritePaths, scanBundleDir, stripUrlCredentials } from "./scan.js";
+import type { KnownIdentity } from "./scan.js";
 import type { DistilledSession, HandoffAdapter, HandoffMeta, ScanFinding } from "./types.js";
 
 /** The single spawn seam. Shaped after the subset of execa's result we use. */
@@ -121,7 +122,10 @@ export async function packCommand(
   }
   log(`bundle written to ${outDir}`);
 
-  const findings = scanBundleDir(outDir);
+  // Threaded through so a redaction miss is a finding, not a silent "clean":
+  // `redaction` is the exact identity this bundle was just redacted against,
+  // and this is the only scan call in the module that can supply it.
+  const findings = scanBundleDir(outDir, { username: redaction.username, hostname: redaction.hostname });
   if (findings.length > 0) {
     printFindings(findings, log);
     log(
@@ -144,7 +148,7 @@ export async function scanCommand(dir: string, log: (s: string) => void): Promis
     log(`no such bundle directory: ${target}`);
     return 1;
   }
-  const findings = scanBundleDir(target);
+  const findings = scanBundleDir(target, localIdentity());
   if (findings.length > 0) {
     printFindings(findings, log);
     return 2;
@@ -198,7 +202,7 @@ export async function pushCommand(
   // uploaded as a served page on the next push.
   rmSync(join(bundleDir, SHARE_URL_FILE), { force: true });
 
-  const findings = scanBundleDir(bundleDir);
+  const findings = scanBundleDir(bundleDir, localIdentity());
   if (findings.length > 0) {
     printFindings(findings, log);
     log("refusing to push: fix the findings above, then push again");
@@ -306,6 +310,18 @@ type Redaction = { home: string; username: string; repoRoot: string; hostname: s
 
 function redactionOptions(repoRoot: string): Redaction {
   return { home: homedir(), username: userInfo().username, repoRoot, hostname: hostname() };
+}
+
+/**
+ * The scan-time identity for `scanCommand` and `pushCommand`, which have no
+ * `Redaction` of their own - they scan a bundle that may have been packed on
+ * this machine (the common case) or copied in from elsewhere. Using the
+ * current machine's identity is the same backstop `packCommand` gets, at no
+ * cost: it can only ADD a finding, never suppress one, and it adds nothing if
+ * the bundle came from a different machine.
+ */
+function localIdentity(): KnownIdentity {
+  return { username: userInfo().username, hostname: hostname() };
 }
 
 function rewriteOrNull(value: string | null, opts: Redaction): string | null {

@@ -421,6 +421,68 @@ describe("scanCommand", () => {
   });
 });
 
+describe("scanCommand / pushCommand - residual identity backstop", () => {
+  // scanBundleDir/scanText are parameterless with respect to identity, so a
+  // bundle where redaction is deliberately bypassed for one occurrence used
+  // to publish or scan clean. `commands.ts` is the only caller that knows
+  // the real hostname and username, so these prove it actually reaches the
+  // scan call for every command that gates on a scan, not only packCommand.
+  // Bundles here are hand-built (bypassing packCommand's rewritePaths
+  // entirely), standing in for "a replacement missed this one occurrence".
+
+  it("scanCommand reports a finding for a leftover OS account name instead of 'scan clean'", async () => {
+    const dir = tempDir();
+    goodBundle(dir);
+    const username = userInfo().username;
+    writeFileSync(join(dir, "handoff.md"), `still signed in as ${username}, again\n`, "utf8");
+    const { log, lines } = collector();
+
+    expect(await scanCommand(dir, log)).toBe(2);
+    expect(lines.some((l) => l.includes("residual-username"))).toBe(true);
+    expect(lines).not.toContain("scan clean");
+  });
+
+  it("scanCommand reports a finding for a leftover machine hostname instead of 'scan clean'", async () => {
+    const dir = tempDir();
+    goodBundle(dir);
+    const host = hostname();
+    writeFileSync(join(dir, "handoff.md"), `built on ${host}, again\n`, "utf8");
+    const { log, lines } = collector();
+
+    expect(await scanCommand(dir, log)).toBe(2);
+    expect(lines.some((l) => l.includes("residual-hostname"))).toBe(true);
+    expect(lines).not.toContain("scan clean");
+  });
+
+  it("scanCommand still reports clean for an ordinary bundle with no leftover identity", async () => {
+    const dir = tempDir();
+    goodBundle(dir);
+    const { log, lines } = collector();
+
+    expect(await scanCommand(dir, log)).toBe(0);
+    expect(lines).toContain("scan clean");
+  });
+
+  it("pushCommand refuses to publish a bundle with a leftover OS account name, without invoking enclave", async () => {
+    const dir = tempDir();
+    goodBundle(dir);
+    const username = userInfo().username;
+    writeFileSync(join(dir, "handoff.md"), `still signed in as ${username}, again\n`, "utf8");
+    const { log, lines } = collector();
+
+    const code = await pushCommand(
+      dir,
+      { expires: "7d", dryRun: false, visibility: "private" },
+      forbiddenExec.exec,
+      log,
+    );
+
+    expect(code).toBe(2);
+    expect(forbiddenExec.calls).toEqual([]);
+    expect(lines.some((l) => l.includes("residual-username"))).toBe(true);
+  });
+});
+
 // Fabricated transcript. Deliberately free of absolute home paths so the pack
 // happy path stays scan-clean; path redaction has its own tests in scan.test.ts.
 const CLAUDE_JSONL = [
@@ -725,6 +787,38 @@ describe("packCommand", () => {
       cwd: work,
     });
     expect(lines.some((l) => l.includes("opencode export oc-1 --sanitize"))).toBe(true);
+  });
+
+  it("reports a scan finding instead of 'scan clean' when redaction misses one occurrence of the username", async () => {
+    // Root cause under test: scanBundleDir/scanText are parameterless with
+    // respect to identity, so a missed replacement used to publish silently.
+    // packCommand is the only place that can build the redaction AND the scan
+    // call from the same known identity, so this pins it end to end rather
+    // than only at the scan.ts unit level.
+    const work = tempDir();
+    const sessionFile = join(work, "session.jsonl");
+    const username = userInfo().username;
+    // A shape rewritePaths' username boundary regex does not cover: the
+    // username immediately followed by a comma, which is not one of the
+    // boundary characters the replacement looks for. Stands in for "a
+    // replacement that missed an occurrence" without touching rewritePaths.
+    writeFileSync(
+      sessionFile,
+      `{"type":"user","sessionId":"s","message":{"role":"user","content":"ping ${username}, are you there"}}`,
+      "utf8",
+    );
+    const out = join(work, "bundle");
+    const { log, lines } = collector();
+
+    const code = await packCommand(
+      { adapter: "claude", cwd: work, sessionFile, out },
+      gitExec().exec,
+      log,
+    );
+
+    expect(code).toBe(2);
+    expect(lines.some((l) => l.includes("residual-username"))).toBe(true);
+    expect(lines).not.toContain("scan clean");
   });
 
   it("returns 1 when opencode is not installed", async () => {
