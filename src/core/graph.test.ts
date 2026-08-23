@@ -250,6 +250,50 @@ edges:
     expect(() => parseGraph(src)).toThrow(/model/);
   });
 
+  it("rejects a command node that declares an adapter", () => {
+    const src = graph(`nodes:
+  a:
+    type: command
+    run: "echo hi"
+    adapter: claude
+edges:
+  - from: a
+    to: END
+`);
+    expect(() => parseGraph(src)).toThrow(/a/);
+    expect(() => parseGraph(src)).toThrow(/adapter/);
+  });
+
+  it("rejects a human node that declares an adapter", () => {
+    const src = graph(`nodes:
+  a:
+    type: human
+    question: "ok?"
+    adapter: claude
+edges:
+  - from: a
+    to: END
+`);
+    expect(() => parseGraph(src)).toThrow(/a/);
+    expect(() => parseGraph(src)).toThrow(/adapter/);
+  });
+
+  it("accepts an agent node with an explicit adapter", () => {
+    const src = graph(`nodes:
+  a:
+    type: agent
+    adapter: claude
+    prompt: "hi"
+edges:
+  - from: a
+    to: END
+`);
+    const parsed = parseGraph(src);
+    const node = parsed.nodes["a"];
+    expect(node?.type).toBe("agent");
+    if (node?.type === "agent") expect(node.adapter).toBe("claude");
+  });
+
   it("rejects an agent node with an unknown adapter", () => {
     const src = graph(`nodes:
   a:
@@ -457,5 +501,100 @@ edges:
     to: END
 `);
     expect(() => parseGraph(src)).toThrow(/reserved/);
+  });
+});
+
+describe("template references", () => {
+  it("accepts declared bare, dotted and node-output references", () => {
+    const src = graph(`vars:
+  ticket: ABC-1
+nodes:
+  a:
+    type: command
+    run: "echo {{ticket}} {{vars.ticket}}"
+  b:
+    type: agent
+    adapter: claude
+    prompt: "Use {{nodes.a.output}}"
+edges:
+  - from: a
+    to: b
+  - from: b
+    to: END
+`);
+    expect(parseGraph(src).nodes.a).toMatchObject({ type: "command" });
+    expect(parseGraph(src).nodes.b).toMatchObject({ type: "agent" });
+  });
+
+  it("rejects a reference to an undeclared node, naming node and reference", () => {
+    const src = graph(`vars:
+  ticket: ABC-1
+nodes:
+  a:
+    type: command
+    run: "echo {{ticket}}"
+  b:
+    type: command
+    run: "echo {{nodes.nope.output}}"
+edges:
+  - from: a
+    to: b
+  - from: b
+    to: END
+`);
+    expect(() => parseGraph(src)).toThrow(GraphValidationError);
+    expect(() => parseGraph(src)).toThrow(/node "b"/);
+    expect(() => parseGraph(src)).toThrow(/nodes\.nope\.output/);
+  });
+
+  it("accepts a dotted var reference to an undeclared var (--var supplies it at runtime)", () => {
+    const src = graph(`nodes:
+  a:
+    type: command
+    run: "echo {{vars.nosuchvar}}"
+edges:
+  - from: a
+    to: END
+`);
+    expect(parseGraph(src).nodes.a).toMatchObject({ type: "command", run: "echo {{vars.nosuchvar}}" });
+  });
+
+  it("accepts a bare reference that is not a declared var (--var supplies it at runtime)", () => {
+    const src = graph(`nodes:
+  a:
+    type: command
+    run: "echo {{nosuchvar}}"
+edges:
+  - from: a
+    to: END
+`);
+    expect(parseGraph(src).nodes.a).toMatchObject({ type: "command", run: "echo {{nosuchvar}}" });
+  });
+
+  it("rejects a reference shape the runtime resolver would reject", () => {
+    const src = graph(`nodes:
+  a:
+    type: command
+    run: "echo {{vars.ticket.extra}}"
+edges:
+  - from: a
+    to: END
+`);
+    expect(() => parseGraph(src)).toThrow(/vars\.ticket\.extra/);
+  });
+
+  it("validates verifier prompts too", () => {
+    const src = graph(`nodes:
+  a:
+    type: verifier
+    adapter: codex
+    prompt: "Check {{nodes.ghost.output}}"
+    pass: "PASS"
+edges:
+  - from: a
+    to: END
+`);
+    expect(() => parseGraph(src)).toThrow(/node "a"/);
+    expect(() => parseGraph(src)).toThrow(/ghost/);
   });
 });
