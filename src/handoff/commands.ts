@@ -164,6 +164,15 @@ export async function pushCommand(
 ): Promise<number> {
   const bundleDir = resolve(dir);
 
+  // Same usage error scanCommand already reports as 1. Without this the path
+  // fell through to the scanner's fail-closed finding and came back as 2, so
+  // the identical typo answered differently depending on the verb. Narrowly
+  // scoped: every other push failure keeps the exit code it has today.
+  if (!existsSync(bundleDir)) {
+    log(`no such bundle directory: ${bundleDir}`);
+    return 1;
+  }
+
   if (opts.visibility !== "private") {
     log(
       `refusing --visibility ${opts.visibility}: a handoff bundle quotes a real ` +

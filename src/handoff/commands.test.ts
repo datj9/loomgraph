@@ -346,6 +346,26 @@ describe("pushCommand", () => {
     expect(lines).toContain("https://enclave.example/a/art_1");
     expect(lines.some((l) => l.includes("no share url"))).toBe(true);
   });
+
+  it("returns 1 for a bundle directory that does not exist, matching scan", async () => {
+    // A typo'd path is a usage error, not an unexpected failure. scan already
+    // answers 1 for exactly this; push answering 2 made the same mistake read
+    // as two different classes of problem depending on which verb you typed.
+    const { log, lines } = collector();
+    const missing = join(tempDir(), "nope");
+
+    const code = await pushCommand(
+      missing,
+      { expires: "7d", dryRun: false, visibility: "private" },
+      forbiddenExec.exec,
+      log,
+    );
+
+    expect(code).toBe(1);
+    expect(lines.some((l) => l.includes("no such bundle directory"))).toBe(true);
+    // Nothing was published: the missing directory is caught before enclave.
+    expect(forbiddenExec.calls).toHaveLength(0);
+  });
 });
 
 describe("scanCommand", () => {
