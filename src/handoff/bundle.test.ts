@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { writeBundle, checkEnclaveConstraints, SHARE_URL_FILE, type BundleFiles } from "./bundle.js";
+import { writeBundle, sanitizeFilesTxt, checkEnclaveConstraints, SHARE_URL_FILE, type BundleFiles } from "./bundle.js";
 import { ENCLAVE_MAX_FILES, ENCLAVE_MAX_FILE_BYTES, ENCLAVE_MAX_TOTAL_BYTES } from "./types.js";
 
 function makeFiles(): BundleFiles {
@@ -150,5 +150,108 @@ describe("writeBundle purges a stale share url", () => {
     // Nothing else would have caught it: .txt is an allowed extension, so the
     // stale link would have been uploaded alongside the new artifact.
     expect(checkEnclaveConstraints(dir)).toEqual([]);
+  });
+});
+
+describe("files.txt repo-relative enforcement", () => {
+  let dir: string;
+  let repoRoot: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "lg-files-"));
+    repoRoot = mkdtempSync(join(tmpdir(), "lg-files-root-"));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(repoRoot, { recursive: true, force: true });
+  });
+
+  const bundleWith = (filesTxt: string): BundleFiles => ({
+    ...makeFiles(),
+    "files.txt": filesTxt,
+  });
+  const written = (): string => readFileSync(join(dir, "files.txt"), "utf8");
+
+  it("emits an absolute in-repo path as a repo-relative path", () => {
+    writeBundle(dir, bundleWith(`${join(repoRoot, "src/app.ts")}\n`), repoRoot);
+    expect(written()).toBe("src/app.ts\n");
+  });
+
+  it("emits a ./ -prefixed relative path without the ./", () => {
+    writeBundle(dir, bundleWith("./rel/thing.ts\n"), repoRoot);
+    expect(written()).toBe("rel/thing.ts\n");
+  });
+
+  it("drops and flags a bare absolute out-of-repo POSIX path", () => {
+    const excluded = writeBundle(dir, bundleWith("/opt/vendor/data/config.json\n"), repoRoot);
+    expect(written()).not.toContain("/opt/vendor/data/config.json");
+    expect(excluded).toContain("/opt/vendor/data/config.json");
+  });
+
+  it("drops and flags a Windows absolute path", () => {
+    const excluded = writeBundle(
+      dir,
+      bundleWith("C:\\Users\\alice\\AppData\\secrets.txt\n"),
+      repoRoot,
+    );
+    expect(written()).not.toContain("secrets.txt");
+    expect(excluded).toContain("C:\\Users\\alice\\AppData\\secrets.txt");
+  });
+
+  it("drops a ../ escape so it never reaches files.txt", () => {
+    const excluded = writeBundle(dir, bundleWith("../outside/x.ts\n"), repoRoot);
+    expect(written()).not.toContain("x.ts");
+    expect(excluded).toContain("../outside/x.ts");
+  });
+
+  it("drops a ../ escape nested after a valid prefix", () => {
+    const excluded = writeBundle(dir, bundleWith("src/../../../etc/passwd\n"), repoRoot);
+    expect(written()).not.toContain("etc/passwd");
+    expect(excluded).toContain("src/../../../etc/passwd");
+  });
+
+  it("matches the worked example", () => {
+    const excluded = writeBundle(
+      dir,
+      bundleWith(
+        [
+          join(repoRoot, "src/app.ts"),
+          "./rel/thing.ts",
+          "/opt/vendor/data/config.json",
+          "C:\\Users\\alice\\AppData\\secrets.txt",
+          "../outside/x.ts",
+        ].join("\n") + "\n",
+      ),
+      repoRoot,
+    );
+    expect(written()).toBe("src/app.ts\nrel/thing.ts\n");
+    expect(excluded.sort()).toEqual(
+      [
+        "/opt/vendor/data/config.json",
+        "C:\\Users\\alice\\AppData\\secrets.txt",
+        "../outside/x.ts",
+      ].sort(),
+    );
+  });
+
+  it("normalises the pipeline's ${REPO_ROOT} placeholder for in-repo paths", () => {
+    const excluded = writeBundle(dir, bundleWith("${REPO_ROOT}/src/app.ts\n"), repoRoot);
+    expect(written()).toBe("src/app.ts\n");
+    expect(excluded).toEqual([]);
+  });
+
+  it("sanitizeFilesTxt flags what it drops instead of swallowing it", () => {
+    const out = sanitizeFilesTxt(
+      [
+        join(repoRoot, "src/app.ts"),
+        "./rel/thing.ts",
+        "/opt/vendor/data/config.json",
+        "C:\\Users\\alice\\AppData\\secrets.txt",
+        "../outside/x.ts",
+      ].join("\n") + "\n",
+      repoRoot,
+    );
+    expect(out.content).toBe("src/app.ts\nrel/thing.ts\n");
+    expect(out.excluded).toHaveLength(3);
+    expect(out.excluded).toContain("/opt/vendor/data/config.json");
   });
 });

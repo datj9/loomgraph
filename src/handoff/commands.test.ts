@@ -346,6 +346,45 @@ describe("pushCommand", () => {
     expect(lines).toContain("https://enclave.example/a/art_1");
     expect(lines.some((l) => l.includes("no share url"))).toBe(true);
   });
+
+  it("refuses an impossible date for --expires before publishing", async () => {
+    // 2026-13-45 is well-shaped and completely unreal. Before this gate it
+    // reached enclave and became an error only AFTER the artifact was live.
+    const dir = tempDir();
+    goodBundle(dir);
+    const { log, lines } = collector();
+
+    const code = await pushCommand(
+      dir,
+      { expires: "2026-13-45", dryRun: false, visibility: "private" },
+      forbiddenExec.exec,
+      log,
+    );
+
+    expect(code).toBe(1);
+    expect(lines.some((l) => l.includes("2026-13-45"))).toBe(true);
+    expect(forbiddenExec.calls).toHaveLength(0);
+  });
+
+  it("returns 1 for a bundle directory that does not exist, matching scan", async () => {
+    // A typo'd path is a usage error, not an unexpected failure. scan already
+    // answers 1 for exactly this; push answering 2 made the same mistake read
+    // as two different classes of problem depending on which verb you typed.
+    const { log, lines } = collector();
+    const missing = join(tempDir(), "nope");
+
+    const code = await pushCommand(
+      missing,
+      { expires: "7d", dryRun: false, visibility: "private" },
+      forbiddenExec.exec,
+      log,
+    );
+
+    expect(code).toBe(1);
+    expect(lines.some((l) => l.includes("no such bundle directory"))).toBe(true);
+    // Nothing was published: the missing directory is caught before enclave.
+    expect(forbiddenExec.calls).toHaveLength(0);
+  });
 });
 
 describe("scanCommand", () => {
@@ -599,5 +638,32 @@ describe("packCommand", () => {
 
     expect(code).toBe(1);
     expect(lines).toContain("no such session");
+  });
+
+  it("drops a non-repo-relative path from files.txt and says so", async () => {
+    // files.txt is a repo-relative manifest. A bare absolute path outside the
+    // repo leaks the host filesystem layout, so it must not survive into the
+    // bundle - and dropping it silently is just as bad, because the author
+    // cannot tell the manifest is incomplete.
+    const work = tempDir();
+    const sessionFile = join(work, "session.jsonl");
+    writeFileSync(
+      sessionFile,
+      [
+        `{"type":"user","sessionId":"sess-9","cwd":"/repo/demo","message":{"role":"user","content":"read /opt/vendor/data/config.json then patch src/app.ts"}}`,
+      ].join("\n"),
+      "utf8",
+    );
+    const out = join(work, "bundle");
+    const fake = gitExec();
+    const { log, lines } = collector();
+
+    const code = await packCommand({ adapter: "claude", cwd: work, sessionFile, out }, fake.exec, log);
+
+    expect(code).toBe(0);
+    const filesTxt = readFileSync(join(out, "files.txt"), "utf8");
+    expect(filesTxt).not.toContain("/opt/vendor/data/config.json");
+    expect(filesTxt).toContain("src/app.ts");
+    expect(lines.some((l) => l.includes("/opt/vendor/data/config.json"))).toBe(true);
   });
 });

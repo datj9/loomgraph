@@ -108,6 +108,39 @@ describe("isValidExpires", () => {
       expect(isValidExpires(value)).toBe(false);
     }
   });
+
+  it("rejects a well-shaped value that is not a real date", () => {
+    // Shape validation alone let 2026-13-45 through the local gate and turned
+    // it into an enclave error AFTER the artifact was already published - the
+    // one moment the check exists to prevent.
+    for (const value of [
+      "2026-13-45",
+      "2026-02-30",
+      "2026-02-29", // 2026 is not a leap year
+      "2026-00-10",
+      "2026-01-32",
+      "2026-08-10T25:00",
+      "2026-08-10T14:60",
+      "2026-02-30T10:00:00Z",
+    ]) {
+      expect(isValidExpires(value)).toBe(false);
+    }
+  });
+
+  it("accepts real calendar edge dates", () => {
+    for (const value of ["2026-02-28", "2028-02-29", "2026-12-31T23:59:59Z"]) {
+      expect(isValidExpires(value)).toBe(true);
+    }
+  });
+
+  it("rejects a zero or empty duration", () => {
+    // `0d` expires the link the instant it is minted, which is never what the
+    // author meant and is indistinguishable from a typo.
+    for (const value of ["0d", "0h", "0w", "00d"]) {
+      expect(isValidExpires(value)).toBe(false);
+    }
+    expect(isValidExpires("7d")).toBe(true);
+  });
 });
 
 describe("parseEnclaveShareCreateJson", () => {

@@ -97,12 +97,24 @@ export async function packCommand(
   const redacted = redactSession(session, cwd);
   const handoffMd = renderHandoffMd(redacted, meta);
 
-  writeBundle(outDir, {
-    "index.html": renderHandoffHtml(handoffMd, meta),
-    "handoff.md": handoffMd,
-    "meta.json": `${JSON.stringify(meta, null, 2)}\n`,
-    "files.txt": renderFilesTxt(redacted),
-  });
+  const excluded = writeBundle(
+    outDir,
+    {
+      "index.html": renderHandoffHtml(handoffMd, meta),
+      "handoff.md": handoffMd,
+      "meta.json": `${JSON.stringify(meta, null, 2)}\n`,
+      "files.txt": renderFilesTxt(redacted),
+    },
+    cwd,
+  );
+  // files.txt is a repo-relative manifest. Anything that cannot be expressed
+  // relative to the repo root would leak the host filesystem layout, so it is
+  // dropped - but never silently: an author reading a short files.txt has to be
+  // able to tell the difference between "nothing else was touched" and "we
+  // refused to publish it".
+  for (const entry of excluded) {
+    log(`warning: dropped ${entry} from files.txt - it is not repo-relative`);
+  }
   log(`bundle written to ${outDir}`);
 
   const findings = scanBundleDir(outDir);
@@ -151,6 +163,15 @@ export async function pushCommand(
   log: (s: string) => void,
 ): Promise<number> {
   const bundleDir = resolve(dir);
+
+  // Same usage error scanCommand already reports as 1. Without this the path
+  // fell through to the scanner's fail-closed finding and came back as 2, so
+  // the identical typo answered differently depending on the verb. Narrowly
+  // scoped: every other push failure keeps the exit code it has today.
+  if (!existsSync(bundleDir)) {
+    log(`no such bundle directory: ${bundleDir}`);
+    return 1;
+  }
 
   if (opts.visibility !== "private") {
     log(
