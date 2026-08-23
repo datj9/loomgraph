@@ -14,6 +14,15 @@ export class EngineError extends Error {
   }
 }
 
+/**
+ * A template reference that cannot be resolved against the run state. Unlike
+ * transient adapter failures the error is deterministic: retrying would only
+ * burn attempts, so the engine fails the node instead of re-running it.
+ * Deliberately no own constructor: instances inherit EngineError's name, so
+ * code asserting the exact EngineError error keeps matching.
+ */
+export class TemplateError extends EngineError {}
+
 export interface EngineDeps {
   store: CheckpointStore;
   log: EventLog;
@@ -65,10 +74,10 @@ export function interpolate(template: string, state: RunState): string {
     } else if (parts[0] === "nodes" && parts.length === 3 && parts[2] === "output") {
       value = state.nodes[parts[1]!]?.output;
     } else {
-      throw new EngineError(`unknown template reference "{{${ref}}}"`);
+      throw new TemplateError(`unknown template reference "{{${ref}}}"`);
     }
 
-    if (value === undefined) throw new EngineError(`unknown template reference "{{${ref}}}"`);
+    if (value === undefined) throw new TemplateError(`unknown template reference "{{${ref}}}"`);
     return typeof value === "string" ? value : JSON.stringify(value);
   });
 }
@@ -237,7 +246,23 @@ export async function execute(graph: Graph, initial: RunState, deps: EngineDeps)
       attempts += 1;
       emit({ kind: "node_started", nodeId: id, data: { attempt: attempts, type: def.type } });
 
-      const out = await runOnce(id, def);
+      let out: AdapterOutput;
+      try {
+        out = await runOnce(id, def);
+      } catch (err) {
+        // M2: an unresolvable template reference is deterministic, so retrying
+        // would only burn attempts. Fail the node through the engine's normal
+        // failure path (commit emits node_finished; the batch branch below
+        // emits run_finished and persists "failed") instead of stranding the
+        // run. Anything else keeps propagating as it does today.
+        if (err instanceof TemplateError) {
+          return {
+            nodeId: id, status: "failed", startedAt, endedAt: new Date().toISOString(),
+            attempts, output: lastText, error: err.message, costUsd,
+          };
+        }
+        throw err;
+      }
       costUsd += out.costUsd;
       lastText = out.text;
 

@@ -95,6 +95,10 @@ describe("interpolate", () => {
     expect(() => interpolate("{{vars.nope}}", start(LINEAR))).toThrow(/nope/);
   });
 
+  it("throws TemplateError so execute can catch an unresolvable reference", () => {
+    expect(() => interpolate("{{vars.nope}}", start(LINEAR))).toThrow(engine.TemplateError);
+  });
+
   it("resolves a node output whose id contains a hyphen", () => {
     const state = start(HYPHEN);
     state.nodes["my-node"] = {
@@ -481,6 +485,37 @@ edges:
     await execute(parseGraph(src), start(src, "run1", { ticket: "LG-42" }), deps(registry));
 
     expect(prompts).toEqual(["Reproduce LG-42", "Fix using out:1"]);
+  });
+
+  it("fails the run through the normal path when a template reference cannot be resolved", async () => {
+    const src = `
+name: badref
+budget: { maxUsd: 10, maxWallClockSec: 600, maxNodeRuns: 20 }
+nodes:
+  a: { type: command, run: "echo {{nodes.nope.output}}", retries: 2 }
+edges:
+  - { from: a, to: END }
+`;
+    const seen: string[] = [];
+    const registry = { command: stub("command", (i) => { seen.push(i.prompt); return ok(i.prompt); }) };
+
+    const final = await execute(parseGraph(src), start(src), deps(registry));
+
+    // Not stranded: the run reaches a terminal failed status, persisted like any other.
+    expect(final.status).toBe("failed");
+    expect(store.load("run1")!.status).toBe("failed");
+    // The node failed through the normal path, so node_finished was emitted for it.
+    const nodeFinished = log.read("run1").filter((e) => e.kind === "node_finished" && e.nodeId === "a");
+    expect(nodeFinished).toHaveLength(1);
+    expect(nodeFinished[0]!.data.status).toBe("failed");
+    // run_finished was emitted for the run.
+    expect(log.read("run1").map((e) => e.kind)).toContain("run_finished");
+    // The recorded error names the unresolvable reference.
+    expect(final.nodes.a!.error).toMatch(/nope/);
+    // A template error is deterministic, so it must not be retried.
+    expect(final.nodes.a!.attempts).toBe(1);
+    // The adapter was never invoked for an unresolvable command template.
+    expect(seen).toEqual([]);
   });
 
   it("refuses to execute a run that is already terminal", async () => {
