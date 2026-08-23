@@ -1,5 +1,8 @@
-import { describe, expect, it } from "vitest";
-import { buildOpencodeArgs, parseOpencodeJsonl } from "./opencode.js";
+import { describe, expect, it, beforeAll, afterAll } from "vitest";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { buildOpencodeArgs, parseOpencodeJsonl, OpenCodeAdapter } from "./opencode.js";
 
 /**
  * Captured by hand from opencode 1.18.17 on 2026-08-15:
@@ -104,4 +107,55 @@ describe("parseOpencodeJsonl", () => {
   it("keeps the raw stdout so a run can be audited", () => {
     expect(parseOpencodeJsonl(SUCCESS_JSONL, 0).raw).toBe(SUCCESS_JSONL);
   });
+
+  it("clamps a negative reported cost to 0", () => {
+    const stdout = [
+      JSON.stringify({ type: "text", part: { text: "hello" } }),
+      JSON.stringify({ type: "step_finish", part: { cost: -0.25 } }),
+    ].join("\n");
+    const out = parseOpencodeJsonl(stdout, 0);
+    expect(out.ok).toBe(true);
+    expect(out.costUsd).toBe(0);
+  });
+
+  it("ignores a negative cost but still sums the positive ones", () => {
+    const stdout = [
+      JSON.stringify({ type: "text", part: { text: "hello" } }),
+      JSON.stringify({ type: "step_finish", part: { cost: -0.25 } }),
+      JSON.stringify({ type: "step_finish", part: { cost: 0.5 } }),
+    ].join("\n");
+    expect(parseOpencodeJsonl(stdout, 0).costUsd).toBeCloseTo(0.5, 10);
+  });
+});
+
+describe("OpenCodeAdapter process handling", () => {
+  // Stub scripts only, invoked by absolute path. No real agent CLI is spawned
+  // and PATH is never touched.
+  let dir: string;
+
+  beforeAll(async () => {
+    dir = await mkdtemp(join(tmpdir(), "lg-opencode-stub-"));
+  });
+
+  afterAll(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("names the binary when it is missing", async () => {
+    const bin = join(dir, "definitely-not-installed");
+    const out = await new OpenCodeAdapter(bin).run({ prompt: "hi", cwd: dir, timeoutSec: 10 });
+    expect(out.ok).toBe(false);
+    expect(out.error).toContain(bin);
+    expect(out.error).toMatch(/not found on PATH/);
+  });
+
+  it("times out when a grandchild outlives the CLI", async () => {
+    const bin = join(dir, "slow-stub.sh");
+    await writeFile(bin, `#!/bin/sh\nsleep 30 &\necho '{"type":"text","part":{"text":"ok"}}'\n`, { mode: 0o755 });
+    const started = Date.now();
+    const out = await new OpenCodeAdapter(bin).run({ prompt: "hi", cwd: dir, timeoutSec: 2 });
+    expect(out.ok).toBe(false);
+    expect(out.error).toMatch(/timeout after 2s/);
+    expect(Date.now() - started).toBeLessThan(3500);
+  }, 20000);
 });
