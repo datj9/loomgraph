@@ -347,6 +347,25 @@ describe("pushCommand", () => {
     expect(lines.some((l) => l.includes("no share url"))).toBe(true);
   });
 
+  it("refuses an impossible date for --expires before publishing", async () => {
+    // 2026-13-45 is well-shaped and completely unreal. Before this gate it
+    // reached enclave and became an error only AFTER the artifact was live.
+    const dir = tempDir();
+    goodBundle(dir);
+    const { log, lines } = collector();
+
+    const code = await pushCommand(
+      dir,
+      { expires: "2026-13-45", dryRun: false, visibility: "private" },
+      forbiddenExec.exec,
+      log,
+    );
+
+    expect(code).toBe(1);
+    expect(lines.some((l) => l.includes("2026-13-45"))).toBe(true);
+    expect(forbiddenExec.calls).toHaveLength(0);
+  });
+
   it("returns 1 for a bundle directory that does not exist, matching scan", async () => {
     // A typo'd path is a usage error, not an unexpected failure. scan already
     // answers 1 for exactly this; push answering 2 made the same mistake read
