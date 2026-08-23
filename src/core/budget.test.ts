@@ -20,8 +20,28 @@ describe("checkBudget", () => {
     expect(res.ok).toBe(true);
   });
 
-  it("passes at exactly the usd ceiling (exclusive)", () => {
+  it("stops at exactly the usd ceiling (inclusive)", () => {
+    // CORE-2: dollars are never projected during admission - the engine
+    // projects { usd: 0, nodeRuns: 1 } - so an exclusive usd ceiling would let
+    // a paid node dispatch once the spend has already reached maxUsd.
     const res = checkBudget(makeState({ spent: { usd: 1, wallClockSec: 0, nodeRuns: 0 } }));
+    expect(res.ok).toBe(false);
+    expect(res.ok === false && res.reason).toMatch(/maxUsd/);
+  });
+
+  it("stops before any dispatch when maxUsd is 0", () => {
+    const res = checkBudget(
+      makeState({
+        budget: { maxUsd: 0, maxWallClockSec: 60, maxNodeRuns: 5 },
+        spent: { usd: 0, wallClockSec: 0, nodeRuns: 0 },
+      }),
+    );
+    expect(res.ok).toBe(false);
+    expect(res.ok === false && res.reason).toMatch(/maxUsd/);
+  });
+
+  it("passes just under the usd ceiling", () => {
+    const res = checkBudget(makeState({ spent: { usd: 0.9999, wallClockSec: 0, nodeRuns: 0 } }));
     expect(res.ok).toBe(true);
   });
 

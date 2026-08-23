@@ -597,4 +597,61 @@ edges:
     expect(() => parseGraph(src)).toThrow(/node "a"/);
     expect(() => parseGraph(src)).toThrow(/ghost/);
   });
+
+  it("rejects an inherited Object.prototype key as a node-output reference", () => {
+    // CORE-3: `in` walks the prototype chain, so `constructor`, `toString`,
+    // `valueOf` and `__proto__` used to pass load-time validation and then
+    // throw TemplateError mid-run - exactly what this pass exists to prevent.
+    for (const ghost of ["constructor", "toString", "valueOf", "__proto__", "hasOwnProperty"]) {
+      const src = graph(`nodes:
+  a:
+    type: command
+    run: "echo {{nodes.${ghost}.output}}"
+edges:
+  - from: a
+    to: END
+`);
+      expect(() => parseGraph(src)).toThrow(GraphValidationError);
+      expect(() => parseGraph(src)).toThrow(new RegExp(`nodes\\.${ghost.replace("__", "__")}\\.output`));
+    }
+  });
+
+  it("validates a human node's question, which the engine interpolates too", () => {
+    // CORE-4: the question is interpolated at run time, so an unknown
+    // reference in it must fail at load time, not after the upstream agent
+    // nodes have already burned real spend.
+    const src = graph(`nodes:
+  a:
+    type: command
+    run: "echo a"
+  approve:
+    type: human
+    question: "Approve {{nodes.reviw.output}}?"
+edges:
+  - from: a
+    to: approve
+  - from: approve
+    to: END
+`);
+    expect(() => parseGraph(src)).toThrow(GraphValidationError);
+    expect(() => parseGraph(src)).toThrow(/node "approve"/);
+    expect(() => parseGraph(src)).toThrow(/reviw/);
+  });
+
+  it("accepts a human question that references a declared node", () => {
+    const src = graph(`nodes:
+  a:
+    type: command
+    run: "echo a"
+  approve:
+    type: human
+    question: "Approve {{nodes.a.output}} for {{vars.ticket}}?"
+edges:
+  - from: a
+    to: approve
+  - from: approve
+    to: END
+`);
+    expect(parseGraph(src).nodes.approve).toMatchObject({ type: "human" });
+  });
 });

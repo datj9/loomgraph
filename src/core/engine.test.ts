@@ -191,6 +191,19 @@ describe("containsPassToken", () => {
     expect(containsPassToken("okay?", "ok?")).toBe(false);
     expect(containsPassToken("[DONE]", "[DONE]")).toBe(true);
   });
+
+  it("applies each word boundary only when the pass string's own edge is a word char", () => {
+    // CORE-5a: a pass string that starts or ends with punctuation has no word
+    // boundary to enforce on that side, so demanding one would reject output
+    // where the token is glued to a word - which is where verifiers put it.
+    expect(containsPassToken("result[PASS]", "[PASS]")).toBe(true);
+    expect(containsPassToken("result[PASS]done", "[PASS]")).toBe(true);
+    expect(containsPassToken("verdict:PASS", ":PASS")).toBe(true);
+    expect(containsPassToken("PASS!ok", "PASS!")).toBe(true);
+    // The word-char side still holds its boundary.
+    expect(containsPassToken("x[PASSING]", "[PASS")).toBe(false);
+    expect(containsPassToken("BYPASS!", "PASS!")).toBe(false);
+  });
 });
 
 describe("execute", () => {
@@ -618,9 +631,36 @@ edges:
     // The recorded error names the unresolvable reference.
     expect(final.nodes.a!.error).toMatch(/nope/);
     // A template error is deterministic, so it must not be retried.
-    expect(final.nodes.a!.attempts).toBe(1);
+    expect(final.nodes.a!.attempts).toBe(0);
     // The adapter was never invoked for an unresolvable command template.
     expect(seen).toEqual([]);
+    // CORE-5b: interpolation fails before dispatch, so the run that never
+    // happened is neither announced nor billed.
+    expect(log.read("run1").filter((e) => e.kind === "node_started" && e.nodeId === "a")).toHaveLength(0);
+    expect(final.spent.nodeRuns).toBe(0);
+  });
+
+  it("does not charge a node run for a template error raised from a graph-legal var reference", async () => {
+    // `{{vars.x}}` is not statically decidable (--var supplies vars at run
+    // time), so this graph parses. The reference is still unresolvable here.
+    const src = `
+name: badvar
+budget: { maxUsd: 10, maxWallClockSec: 600, maxNodeRuns: 20 }
+nodes:
+  a: { type: command, run: "echo {{vars.missing}}", retries: 2 }
+edges:
+  - { from: a, to: END }
+`;
+    const seen: string[] = [];
+    const registry = { command: stub("command", (i) => { seen.push(i.prompt); return ok(i.prompt); }) };
+
+    const final = await execute(parseGraph(src), start(src), deps(registry));
+
+    expect(final.status).toBe("failed");
+    expect(seen).toEqual([]);
+    expect(final.nodes.a!.attempts).toBe(0);
+    expect(final.spent.nodeRuns).toBe(0);
+    expect(log.read("run1").filter((e) => e.kind === "node_started")).toHaveLength(0);
   });
 
   it("refuses to execute a run that is already terminal", async () => {
@@ -654,6 +694,75 @@ edges:
     const exceeded = log.read("run1").filter((e) => e.kind === "budget_exceeded");
     expect(exceeded).toHaveLength(1);
     expect(String(exceeded[0]!.data.reason)).toMatch(/maxNodeRuns/);
+  });
+
+  it("never dispatches more runs than maxNodeRuns across a concurrent batch (CORE-1)", async () => {
+    // CORE-1: batch siblings run concurrently and each used to project its
+    // retries against a snapshot of the shared state, so neither saw the
+    // other's runs. With maxNodeRuns 5 (root plus 4) two retrying siblings
+    // dispatched 4 attempts each - 9 runs against a ceiling of 5, and the
+    // overshoot grew with the batch width.
+    const src = `
+name: core1-concurrent
+budget: { maxUsd: 999, maxWallClockSec: 999999, maxNodeRuns: 5 }
+nodes:
+  root: { type: command, run: "echo root" }
+  a: { type: command, run: "fail a", retries: 3 }
+  b: { type: command, run: "fail b", retries: 3 }
+edges:
+  - { from: root, to: [a, b] }
+  - { from: [a, b], to: END }
+`;
+    const dispatched: string[] = [];
+    const registry = {
+      command: stub("command", (i) => {
+        dispatched.push(i.prompt);
+        return i.prompt === "echo root" ? ok("root") : bad("still broken");
+      }),
+    };
+
+    const final = await execute(parseGraph(src), start(src, "core1-run"), deps(registry));
+
+    // The invariant: dispatches never exceed the ceiling, whatever the
+    // interleaving of the concurrent siblings.
+    expect(dispatched.length).toBeLessThanOrEqual(5);
+    expect(dispatched.length).toBe(5);
+    expect(final.spent.nodeRuns).toBeLessThanOrEqual(5);
+    const started = log.read("core1-run").filter((e) => e.kind === "node_started");
+    expect(started).toHaveLength(5);
+
+    expect(final.status).toBe("failed");
+    const exceeded = log.read("core1-run").filter((e) => e.kind === "budget_exceeded");
+    expect(exceeded).toHaveLength(1);
+    expect(String(exceeded[0]!.data.reason)).toMatch(/maxNodeRuns/);
+  });
+
+  it("caps a wide concurrent batch at maxNodeRuns rather than at batch width (CORE-1)", async () => {
+    const src = `
+name: core1-wide
+budget: { maxUsd: 999, maxWallClockSec: 999999, maxNodeRuns: 7 }
+nodes:
+  root: { type: command, run: "echo root" }
+  a: { type: command, run: "fail a", retries: 5 }
+  b: { type: command, run: "fail b", retries: 5 }
+  c: { type: command, run: "fail c", retries: 5 }
+edges:
+  - { from: root, to: [a, b, c] }
+  - { from: [a, b, c], to: END }
+`;
+    const dispatched: string[] = [];
+    const registry = {
+      command: stub("command", (i) => {
+        dispatched.push(i.prompt);
+        return i.prompt === "echo root" ? ok("root") : bad("still broken");
+      }),
+    };
+
+    const final = await execute(parseGraph(src), start(src, "core1-wide"), deps(registry));
+
+    expect(dispatched.length).toBeLessThanOrEqual(7);
+    expect(final.spent.nodeRuns).toBeLessThanOrEqual(7);
+    expect(final.status).toBe("failed");
   });
 
   it("refuses to dispatch the fan-out nodes that would exceed maxNodeRuns, leaving no side effects (C2)", async () => {
@@ -816,10 +925,10 @@ edges:
     expect(log.read("run1").filter((e) => e.kind === "budget_exceeded")).toHaveLength(0);
   });
 
-  it("treats a final spend exactly at the usd ceiling as within budget", async () => {
+  it("stops before the next batch when the spend reaches the usd ceiling exactly", async () => {
     const src = `
 name: exactly
-budget: { maxUsd: 0.30, maxWallClockSec: 600, maxNodeRuns: 20 }
+budget: { maxUsd: 1.00, maxWallClockSec: 600, maxNodeRuns: 20 }
 nodes:
   a: { type: command, run: "echo a" }
   b: { type: command, run: "echo b" }
@@ -827,15 +936,55 @@ edges:
   - { from: a, to: b }
   - { from: b, to: END }
 `;
+    const dispatched: string[] = [];
     const registry = {
-      command: stub("command", (i) => (i.prompt === "echo a" ? ok("a", 0.15) : ok("b", 0.15))),
+      command: stub("command", (i) => {
+        dispatched.push(i.prompt);
+        return ok("a", 1.0);
+      }),
     };
 
     const final = await execute(parseGraph(src), start(src), deps(registry));
 
-    // H3: ceilings are exclusive. Spending exactly maxUsd is permitted.
-    expect(final.status).toBe("succeeded");
-    expect(log.read("run1").filter((e) => e.kind === "budget_exceeded")).toHaveLength(0);
+    // CORE-2: the usd ceiling is inclusive. Node a spends exactly maxUsd, so
+    // node b - which would cost more dollars nobody has - is never dispatched.
+    expect(dispatched).toEqual(["echo a"]);
+    expect(final.status).toBe("failed");
+    expect(final.nodes.b).toBeUndefined();
+    const exceeded = log.read("run1").filter((e) => e.kind === "budget_exceeded");
+    expect(exceeded).toHaveLength(1);
+    expect(String(exceeded[0]!.data.reason)).toMatch(/maxUsd/);
+  });
+
+  it("dispatches nothing at all when maxUsd is 0", async () => {
+    const src = `
+name: zero-usd
+budget: { maxUsd: 1, maxWallClockSec: 600, maxNodeRuns: 20 }
+nodes:
+  a: { type: command, run: "echo a" }
+edges:
+  - { from: a, to: END }
+`;
+    const dispatched: string[] = [];
+    const registry = {
+      command: stub("command", (i) => {
+        dispatched.push(i.prompt);
+        return ok("a", 0.5);
+      }),
+    };
+    // parseGraph requires maxUsd > 0, so a zero ceiling can only reach the
+    // engine through a checkpoint or a hand-built state - it must still hold.
+    const state = start(src);
+    state.budget = { ...state.budget, maxUsd: 0 };
+
+    const final = await execute(parseGraph(src), state, deps(registry));
+
+    expect(dispatched).toEqual([]);
+    expect(final.status).toBe("failed");
+    expect(final.spent.nodeRuns).toBe(0);
+    const exceeded = log.read("run1").filter((e) => e.kind === "budget_exceeded");
+    expect(exceeded).toHaveLength(1);
+    expect(String(exceeded[0]!.data.reason)).toMatch(/maxUsd/);
   });
 
   it("fails a run whose final spend is a cent over the usd ceiling", async () => {

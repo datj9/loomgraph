@@ -1,5 +1,5 @@
 import { isAbsolute, resolve } from "node:path";
-import type { Adapter, AdapterOutput } from "../adapters/types.js";
+import type { Adapter, AdapterInput, AdapterOutput } from "../adapters/types.js";
 import type { AdapterRegistry } from "../adapters/registry.js";
 import { checkBudget, recordSpend } from "./budget.js";
 import { END, type Edge, type Graph, type NodeDef } from "./graph.js";
@@ -143,10 +143,18 @@ function escapeRegExp(s: string): string {
  * The token must not be glued to word characters on either side, so "PASS"
  * matches "looks good - PASS" but not "PASSWORD" or "BYPASS". The pass string
  * itself is otherwise matched literally.
+ *
+ * A boundary is only meaningful on a side where the pass string's own edge is
+ * a word character. `pass: "[PASS]"` has no word boundary to enforce - it is
+ * already self-delimiting - so demanding a non-word char before it would
+ * reject the verifier output `result[PASS]`, which plain substring matching
+ * accepted. Each side is therefore constrained independently.
  */
 export function containsPassToken(text: string, pass: string): boolean {
-  const boundary = "(?:^|[^A-Za-z0-9_])";
-  return new RegExp(`${boundary}${escapeRegExp(pass)}(?:$|[^A-Za-z0-9_])`).test(text);
+  const isWordChar = (c: string | undefined): boolean => c !== undefined && /[A-Za-z0-9_]/.test(c);
+  const lead = isWordChar(pass[0]) ? "(?:^|[^A-Za-z0-9_])" : "";
+  const trail = isWordChar(pass[pass.length - 1]) ? "(?:$|[^A-Za-z0-9_])" : "";
+  return new RegExp(`${lead}${escapeRegExp(pass)}${trail}`).test(text);
 }
 
 /**
@@ -199,6 +207,13 @@ export async function execute(graph: Graph, initial: RunState, deps: EngineDeps)
   // a retry refused inside executeNode, and always consumed by the budget
   // stop path (emit budget_exceeded + finish("failed", reason)).
   let budgetStopReason: string | null = null;
+  // CORE-1: node runs that have been dispatched but not yet folded into
+  // `state.spent`. `commit` only runs after a node finishes, so within a
+  // concurrent batch every sibling's in-flight attempts would otherwise be
+  // invisible to every other one. Each attempt reserves here before it
+  // dispatches; the batch loop settles the reservation against state.spent
+  // when the node's result lands. Always back to 0 between batches.
+  let reservedNodeRuns = 0;
   if (state.status === "succeeded" || state.status === "failed") {
     throw new EngineError(`run ${state.runId} is already ${state.status} and cannot be executed again`);
   }
@@ -230,31 +245,17 @@ export async function execute(graph: Graph, initial: RunState, deps: EngineDeps)
     let lastText = "";
 
     while (attempts < maxAttempts) {
-      // C2 part B: a retry is a node run like any other, so one must never be
-      // spent once the ceilings would be crossed. Check the budget before each
-      // attempt and stop retrying the moment it refuses. The first attempt of
-      // an admitted node always passes: part A already admitted it with a
-      // projection of one run, and attempts + 1 equals 1 here.
-      const projected = recordSpend(state, { usd: 0, nodeRuns: attempts + 1 });
-      const admission = checkBudget(projected);
-      if (!admission.ok) {
-        budgetStopReason = admission.reason;
-        lastError = admission.reason;
-        break;
-      }
-
-      attempts += 1;
-      emit({ kind: "node_started", nodeId: id, data: { attempt: attempts, type: def.type } });
-
-      let out: AdapterOutput;
+      // M2 / CORE-5b: resolve the templates before anything is reserved or
+      // announced. An unresolvable reference is deterministic, so retrying
+      // would only burn attempts: fail the node through the engine's normal
+      // failure path (commit emits node_finished; the batch branch below
+      // emits run_finished and persists "failed") instead of stranding the
+      // run. Because nothing was dispatched, the node is charged no run and
+      // no node_started is emitted for it. Anything else keeps propagating.
+      let dispatch: { adapter: Adapter; input: AdapterInput };
       try {
-        out = await runOnce(id, def);
+        dispatch = prepareDispatch(id, def);
       } catch (err) {
-        // M2: an unresolvable template reference is deterministic, so retrying
-        // would only burn attempts. Fail the node through the engine's normal
-        // failure path (commit emits node_finished; the batch branch below
-        // emits run_finished and persists "failed") instead of stranding the
-        // run. Anything else keeps propagating as it does today.
         if (err instanceof TemplateError) {
           return {
             nodeId: id, status: "failed", startedAt, endedAt: new Date().toISOString(),
@@ -263,6 +264,26 @@ export async function execute(graph: Graph, initial: RunState, deps: EngineDeps)
         }
         throw err;
       }
+
+      // C2 part B / CORE-1: a retry is a node run like any other, so one must
+      // never be spent once the ceilings would be crossed. Reserve the run
+      // against the shared counter before dispatching - not against a private
+      // projection of this node's own attempts - so concurrent siblings see
+      // each other's in-flight runs and the batch as a whole stays under the
+      // ceiling instead of overshooting by its width.
+      const projected = recordSpend(state, { usd: 0, nodeRuns: reservedNodeRuns + 1 });
+      const admission = checkBudget(projected);
+      if (!admission.ok) {
+        budgetStopReason = admission.reason;
+        lastError = admission.reason;
+        break;
+      }
+      reservedNodeRuns += 1;
+
+      attempts += 1;
+      emit({ kind: "node_started", nodeId: id, data: { attempt: attempts, type: def.type } });
+
+      const out = await runOnce(id, def, dispatch);
       costUsd += out.costUsd;
       lastText = out.text;
 
@@ -276,32 +297,45 @@ export async function execute(graph: Graph, initial: RunState, deps: EngineDeps)
     return { nodeId: id, status: "failed", startedAt, endedAt: new Date().toISOString(), attempts, output: lastText, error: lastError, costUsd };
   };
 
-  const runOnce = async (id: string, def: NodeDef): Promise<AdapterOutput> => {
+  type Dispatch = { adapter: Adapter; input: AdapterInput };
+
+  /**
+   * Everything an attempt needs, resolved before the run is reserved against
+   * the budget or announced as node_started. Interpolation lives here rather
+   * than inside the dispatch so a TemplateError cannot charge a node run for
+   * an adapter call that never happened.
+   */
+  const prepareDispatch = (id: string, def: NodeDef): Dispatch => {
     const adapter = pickAdapter(def, registry);
     const cwd = nodeCwd(def, state);
 
     if (def.type === "command") {
-      const out = await adapter.run({ prompt: interpolate(def.run, state), cwd, timeoutSec: def.timeoutSec });
-      if (out.ok) {
-        const expectationError = checkCommandExpectations(def, out.text);
-        if (expectationError !== null) {
-          return { ...out, ok: false, error: expectationError };
-        }
-      }
-      return out;
+      return { adapter, input: { prompt: interpolate(def.run, state), cwd, timeoutSec: def.timeoutSec } };
     }
     if (def.type === "human") {
       throw new EngineError(`human node "${id}" cannot be dispatched to an adapter`);
     }
+    return {
+      adapter,
+      input: {
+        prompt: interpolate(def.prompt, state),
+        cwd,
+        maxTurns: def.maxTurns,
+        model: def.model,
+        timeoutSec: def.timeoutSec,
+      },
+    };
+  };
 
-    const out = await adapter.run({
-      prompt: interpolate(def.prompt, state),
-      cwd,
-      maxTurns: def.maxTurns,
-      model: def.model,
-      timeoutSec: def.timeoutSec,
-    });
+  const runOnce = async (id: string, def: NodeDef, dispatch: Dispatch): Promise<AdapterOutput> => {
+    const out = await dispatch.adapter.run(dispatch.input);
 
+    if (def.type === "command" && out.ok) {
+      const expectationError = checkCommandExpectations(def, out.text);
+      if (expectationError !== null) {
+        return { ...out, ok: false, error: expectationError };
+      }
+    }
     if (def.type === "verifier" && out.ok && !containsPassToken(out.text, def.pass)) {
       return { ...out, ok: false, error: `verifier "${id}" did not report the pass string "${def.pass}"` };
     }
@@ -385,7 +419,7 @@ export async function execute(graph: Graph, initial: RunState, deps: EngineDeps)
       // dispatch, so a node whose run would push the spent node-run count over
       // the ceiling is never dispatched and leaves no side effect. Everything
       // admitted still runs concurrently, checkpointing as each lands.
-      let projection = state;
+      let projection = recordSpend(state, { usd: 0, nodeRuns: reservedNodeRuns });
       const admitted: string[] = [];
       for (const id of batch) {
         projection = recordSpend(projection, { usd: 0, nodeRuns: 1 });
@@ -400,6 +434,10 @@ export async function execute(graph: Graph, initial: RunState, deps: EngineDeps)
       const results = await Promise.all(
         admitted.map(async (id) => {
           const result = await executeNode(id, graph.nodes[id]!);
+          // CORE-1: settle this node's reservations - commit folds exactly the
+          // same count into state.spent, so the two must move together with no
+          // await between them or a sibling would double-count the runs.
+          reservedNodeRuns -= result.attempts;
           commit(result);
           return result;
         }),

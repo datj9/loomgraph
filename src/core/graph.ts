@@ -125,8 +125,18 @@ const templateRefPattern = /\{\{\s*([A-Za-z0-9_.\-]+)\s*\}\}/g;
 
 function checkTemplateReferences(nodes: Record<string, NodeDef>): void {
   for (const [id, def] of Object.entries(nodes)) {
+    // A human node's question is interpolated by the engine exactly like an
+    // agent prompt, so it gets the same load-time check. Skipping it let a
+    // typo'd reference survive parseGraph and --dry-run, then fail the run at
+    // the human node after every upstream agent had already spent.
     const template =
-      def.type === "command" ? def.run : def.type === "agent" || def.type === "verifier" ? def.prompt : null;
+      def.type === "command"
+        ? def.run
+        : def.type === "agent" || def.type === "verifier"
+          ? def.prompt
+          : def.type === "human"
+            ? def.question
+            : null;
     if (template === null) continue;
     for (const match of template.matchAll(templateRefPattern)) {
       const ref = match[1]!;
@@ -137,7 +147,10 @@ function checkTemplateReferences(nodes: Record<string, NodeDef>): void {
       } else if (parts[0] === "vars" && parts.length === 2) {
         ok = true;
       } else if (parts[0] === "nodes" && parts.length === 3 && parts[2] === "output") {
-        ok = parts[1]! in nodes;
+        // Own keys only: `in` walks the prototype chain, so `constructor`,
+        // `toString` and `__proto__` would pass validation here and then
+        // throw TemplateError mid-run.
+        ok = Object.hasOwn(nodes, parts[1]!);
       } else {
         ok = false;
       }
