@@ -412,6 +412,47 @@ describe("rewritePaths", () => {
     });
     expect(fires(out, "abs-home-path")).toBe(false);
   });
+
+  it("rewrites the machine hostname in both its long and short forms", () => {
+    const out = rewritePaths(
+      "built on dats-macbook.local, short form dats-macbook, and dats-macbookpro stays",
+      {
+        home: "/Users/dat",
+        username: "dat",
+        repoRoot: "/Users/dat/app",
+        hostname: "dats-macbook.local",
+      },
+    );
+    expect(out).toBe(
+      "built on ${HOSTNAME}, short form ${HOSTNAME}, and dats-macbookpro stays",
+    );
+    expect(out).not.toContain("dats-macbook.local");
+  });
+
+  it("does not rewrite a hostname that is a prefix or suffix of a longer token", () => {
+    const out = rewritePaths("host web1 vs web10 vs web1a vs xweb1", {
+      home: "/opt/h",
+      username: "",
+      repoRoot: "/opt/r",
+      hostname: "web1",
+    });
+    expect(out).toBe("host ${HOSTNAME} vs web10 vs web1a vs xweb1");
+  });
+
+  it("leaves the text alone when no hostname is supplied", () => {
+    const input = "built on dats-macbook.local";
+    expect(
+      rewritePaths(input, { home: "/Users/dat", username: "dat", repoRoot: "/Users/dat/app" }),
+    ).toBe(input);
+    expect(
+      rewritePaths(input, {
+        home: "/Users/dat",
+        username: "dat",
+        repoRoot: "/Users/dat/app",
+        hostname: "",
+      }),
+    ).toBe(input);
+  });
 });
 
 describe("scanBundleDir", () => {

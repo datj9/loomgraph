@@ -301,6 +301,20 @@ function replaceUsernameToken(text: string, username: string): string {
 }
 
 /**
+ * Replace `host` only when it stands alone as a host token.
+ *
+ * Bounded the same way `replaceUsernameToken` is bounded, but with a host-shaped
+ * character class: a hostname may legitimately contain `.` and `-`, so `web1`
+ * must not be pulled out of `web10`, `web1a` or `xweb1`.
+ */
+function replaceHostnameToken(text: string, host: string): string {
+  if (host.length === 0) return text;
+  const escaped = host.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`(^|[^A-Za-z0-9.-])${escaped}(?![A-Za-z0-9.-])`, "g");
+  return text.replace(re, (_match, prefix: string) => `${prefix}${HOSTNAME_PLACEHOLDER}`);
+}
+
+/**
  * Rewrite machine-specific absolute paths into placeholders.
  *
  * `repoRoot` is applied before `home` when it is the longer string, so a repo
@@ -309,12 +323,14 @@ function replaceUsernameToken(text: string, username: string): string {
  * username are rewritten too, because a transcript can quote a path from
  * another machine. A standalone username token becomes `user`, but only at
  * path / whitespace / quote / `@` / `:` boundaries so `dataset` and
- * `dat-laptop` stay intact. Residual `/Users/<name>/` paths are still caught
- * by the `abs-home-path` scan rule.
+ * `dat-laptop` stay intact. The machine hostname is rewritten to `${HOSTNAME}`
+ * in both its long and short forms, bounded so it cannot be pulled out of a
+ * longer token. Residual `/Users/<name>/` paths are still caught by the
+ * `abs-home-path` scan rule.
  */
 export function rewritePaths(
   text: string,
-  opts: { home: string; username: string; repoRoot: string },
+  opts: { home: string; username: string; repoRoot: string; hostname?: string },
 ): string {
   const roots: Array<{ from: string; to: string }> = [
     { from: normalizeRoot(opts.repoRoot), to: "${REPO_ROOT}" },
@@ -327,6 +343,18 @@ export function rewritePaths(
   let out = text;
   for (const root of roots) {
     out = replaceLiteral(out, root.from, root.to);
+  }
+
+  // The full form first: rewriting the short form first would leave a dangling
+  // `.local` behind. `hostname` prints the long form, `hostname -s` the short one,
+  // and a transcript can quote either.
+  const host = opts.hostname ?? "";
+  if (host.length > 0) {
+    out = replaceHostnameToken(out, host);
+    const short = host.split(".")[0] ?? "";
+    if (short.length > 0 && short !== host) {
+      out = replaceHostnameToken(out, short);
+    }
   }
 
   if (opts.username.length > 0) {
@@ -371,3 +399,6 @@ export function stripUrlCredentials(text: string): string {
 
 /** What replaces a stripped `user:pass` pair, so the removal is visible. */
 const CREDENTIAL_PLACEHOLDER = "${CREDENTIALS_REMOVED}";
+
+/** What replaces the machine hostname, so the removal is visible in a published bundle. */
+const HOSTNAME_PLACEHOLDER = "${HOSTNAME}";
