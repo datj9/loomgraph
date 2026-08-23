@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { packCommand, pushCommand, scanCommand, type Exec } from "./commands.js";
 import { SHARE_URL_FILE, writeBundle } from "./bundle.js";
 
@@ -476,6 +476,42 @@ describe("packCommand", () => {
 
     // Only git was spawned; packing never touches enclave.
     expect(new Set(fake.calls.map((c) => c.bin))).toEqual(new Set(["git"]));
+  });
+
+  it("rewrites the machine hostname out of a packed bundle", async () => {
+    // S1 added hostname rewriting to rewritePaths behind an optional parameter, but nothing
+    // passed one, so the fix was inert and hostnames still reached a published brief. This
+    // pins the wiring, not just the helper.
+    const host = hostname();
+    const short = host.split(".")[0]!;
+    const work = tempDir();
+    const sessionFile = join(work, "session.jsonl");
+    const turns = [
+      { type: "user", message: { role: "user", content: "why does it fail" } },
+      {
+        type: "assistant",
+        message: {
+          role: "assistant",
+          // Long form, then the bare short form. `${short}-ci` is a DIFFERENT host, so the
+          // bounded rewrite must leave it alone - that boundary is the point of the helper.
+          content: `fails on ${host} and on ${short} but never on ${short}-ci`,
+        },
+      },
+    ];
+    writeFileSync(sessionFile, turns.map((t) => JSON.stringify(t)).join("\n"), "utf8");
+    const out = join(work, "bundle");
+    const fake = gitExec();
+    const { log } = collector();
+
+    expect(await packCommand({ adapter: "claude", cwd: work, sessionFile, out }, fake.exec, log)).toBe(0);
+
+    const md = readFileSync(join(out, "handoff.md"), "utf8");
+    // Both the long and the short form are gone, replaced by the placeholder.
+    expect(md).toContain("${HOSTNAME}");
+    expect(md).not.toContain(`on ${host}`);
+    expect(md).not.toContain(`on ${short} `);
+    // A longer host that merely starts with the short form is untouched.
+    expect(md).toContain(`${short}-ci`);
   });
 
   it("strips credentials out of a remote url before publishing it", async () => {

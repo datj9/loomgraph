@@ -14,7 +14,7 @@
  */
 
 import { existsSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { homedir, userInfo } from "node:os";
+import { homedir, hostname, userInfo } from "node:os";
 import { join, resolve } from "node:path";
 import { SHARE_URL_FILE, checkEnclaveConstraints, writeBundle } from "./bundle.js";
 import {
@@ -302,7 +302,7 @@ function parseTranscript(adapter: HandoffAdapter, text: string): DistilledSessio
  * Returns a new session; the input is never mutated.
  */
 function redactSession(session: DistilledSession, repoRoot: string): DistilledSession {
-  const opts = { home: homedir(), username: userInfo().username, repoRoot };
+  const opts = { home: homedir(), username: userInfo().username, repoRoot, hostname: hostname() };
   return {
     ...session,
     cwd: session.cwd === null ? null : rewritePaths(session.cwd, opts),

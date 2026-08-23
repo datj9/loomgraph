@@ -587,18 +587,24 @@ edges:
   });
 
   it("fails the run through the normal path when a template reference cannot be resolved", async () => {
+    // `lg validate` now rejects an unknown node reference at parse time, so this graph
+    // cannot be built from source any more. The engine keeps its own runtime guard because
+    // `execute` is a library entry point a caller can reach with a hand-built graph.
     const src = `
 name: badref
 budget: { maxUsd: 10, maxWallClockSec: 600, maxNodeRuns: 20 }
 nodes:
-  a: { type: command, run: "echo {{nodes.nope.output}}", retries: 2 }
+  a: { type: command, run: "echo ok", retries: 2 }
 edges:
   - { from: a, to: END }
 `;
+    const graph = parseGraph(src);
+    (graph.nodes.a as { run: string }).run = "echo {{nodes.nope.output}}";
+
     const seen: string[] = [];
     const registry = { command: stub("command", (i) => { seen.push(i.prompt); return ok(i.prompt); }) };
 
-    const final = await execute(parseGraph(src), start(src), deps(registry));
+    const final = await execute(graph, start(src), deps(registry));
 
     // Not stranded: the run reaches a terminal failed status, persisted like any other.
     expect(final.status).toBe("failed");
