@@ -231,6 +231,18 @@ describe("scanText — hits and near-misses per rule", () => {
     expect(fires("rotate the ENCLAVE_TOKEN weekly", "env-assignment")).toBe(false);
   });
 
+  it("env-assignment catches a bare key assignment in both shell and json shapes", () => {
+    expect(fires("key=" + shaped("FAKE", "fakevalue0000"), "env-assignment")).toBe(true);
+    expect(fires('{"key": "' + shaped("FAKE", "fakevalue0000") + '"}', "env-assignment")).toBe(true);
+    expect(fires('{"key":"' + shaped("FAKE", "fakevalue0000") + '"}', "env-assignment")).toBe(true);
+    expect(fires("MY_SERVICE_KEY=" + shaped("FAKE", "fakevalue0000"), "env-assignment")).toBe(true);
+    // The hyphenated spelling of the api key name.
+    expect(fires('API-KEY: "' + shaped("FAKE", "fakevalue0000") + '"', "env-assignment")).toBe(true);
+    // Placeholders stay placeholders.
+    expect(fires("key=", "env-assignment")).toBe(false);
+    expect(fires('key=""', "env-assignment")).toBe(false);
+  });
+
   it("abs-home-path", () => {
     expect(fires("/Users/someone/Documents/notes.md", "abs-home-path")).toBe(true);
     expect(fires("/home/someone/src/app.ts", "abs-home-path")).toBe(true);

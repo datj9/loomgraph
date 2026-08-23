@@ -78,10 +78,12 @@ export const SCAN_RULES: ReadonlyArray<{
     name: "env-assignment",
     // Case-insensitive: a .env line is upper-case by convention but a JSON key
     // or a lower-case shell export is the same secret. The name may also BE the
-    // word (`password: x`), not just end in it. The value must be non-empty:
-    // `FOO_TOKEN=` and `FOO_TOKEN=""` are placeholders, not secrets.
+    // word (`password: x`), not just end in it. A bare `key` name counts too,
+    // because an opencode / .netrc style config writes the credential under
+    // exactly that name. The value must be non-empty: `FOO_TOKEN=` and
+    // `FOO_TOKEN=""` are placeholders, not secrets.
     pattern:
-      /(?:[A-Za-z0-9_]*_)?(?:TOKEN|SECRET|PASSWD|PASSWORD|API_?KEY)"?\s*[:=]\s*(?:"[^"\s]+"|'[^'\s]+'|[^\s"';,]+)/i,
+      /(?:[A-Za-z0-9_]*_)?(?:TOKEN|SECRET|PASSWD|PASSWORD|API[_-]?KEY|KEY)"?\s*[:=]\s*(?:"[^"\s]+"|'[^'\s]+'|[^\s"';,]+)/i,
     description: "Assignment to a token / secret / password / api-key name",
   },
   {
