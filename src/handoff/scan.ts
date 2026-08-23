@@ -96,7 +96,17 @@ export const SCAN_RULES: ReadonlyArray<{
     // scheme://user:password@host - the shape a git remote, a database URI and
     // a curl command all use. This is the rule that catches a credential-
     // bearing `git remote get-url` value, which no vendor-prefix rule can.
-    pattern: /\b[a-z][a-z0-9+.-]*:\/\/[^/\s:@]+:[^/\s@]+@/i,
+    //
+    // The scheme quantifier is bounded ({0,20}, so 21 characters max) rather
+    // than unbounded (`*`). Unbounded, a line with no `://` at all - a long
+    // hyphen/dot-separated token, no credentials in sight - makes the engine
+    // greedily consume to end of line and then backtrack one character at a
+    // time looking for `://`, at every word-boundary start position. That is
+    // O(n) backtracking work times O(n) start positions: a 100k-char line of
+    // `abc-def-ghi-jkl-` repeated took ~4.2s. No real URI scheme comes close
+    // to 21 characters (`https`, `postgres`, `mongodb+srv` all fit easily),
+    // so the bound costs no real match and caps the backtrack at a constant.
+    pattern: /\b[a-z][a-z0-9+.-]{0,20}:\/\/[^/\s:@]+:[^/\s@]+@/i,
     description: "Credentials embedded in a URL (scheme://user:pass@host)",
   },
   {
@@ -195,6 +205,91 @@ export const SCAN_RULES: ReadonlyArray<{
   },
 ];
 
+/**
+ * The machine facts the caller already knows because it just redacted them
+ * (see `redactionOptions` in commands.ts). Optional so `scanText` and
+ * `scanBundleDir` stay usable by any caller that has no identity to check -
+ * but a caller that DOES know it, like `packCommand`, can no longer run a
+ * scan blind to the value it just tried to scrub.
+ */
+export interface KnownIdentity {
+  username?: string;
+  hostname?: string;
+}
+
+/** Rule name for a residual OS account name the redaction pass should have removed. */
+export const RESIDUAL_USERNAME_RULE = "residual-username";
+
+/** Rule name for a residual machine hostname with no `.local` suffix to anchor on. */
+export const RESIDUAL_HOSTNAME_RULE = "residual-hostname";
+
+/**
+ * A username shorter than this is not backstopped by the scanner, only by
+ * `rewritePaths` itself. Below this length a bounded word-boundary match
+ * still fires on ordinary English ("am", "hi", "ok"), and a scanner that
+ * blocks legitimate prose on every push gets disabled by its own users -
+ * worse than the one narrow gap it leaves open.
+ */
+const MIN_RESIDUAL_USERNAME_LENGTH = 3;
+
+/** Same escaping `replaceUsernameToken` / `replaceHostnameToken` use, shared so the three stay in sync. */
+function escapeForRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Build the identity-shaped rules for one scan call. Not part of `SCAN_RULES`
+ * itself - these depend on a value only the caller has, so they are
+ * constructed fresh per call rather than baked into the static rule table.
+ *
+ * Bounded the same way `replaceUsernameToken` / `replaceHostnameToken` bound
+ * their replacement, and case-insensitive for the same reason: a leftover can
+ * be quoted in whatever case a log line or pasted prompt happened to use.
+ */
+function identityRules(
+  identity: KnownIdentity | undefined,
+): Array<{ name: string; pattern: RegExp; description: string }> {
+  const rules: Array<{ name: string; pattern: RegExp; description: string }> = [];
+
+  const username = identity?.username ?? "";
+  if (username.length >= MIN_RESIDUAL_USERNAME_LENGTH) {
+    const escaped = escapeForRegExp(username);
+    rules.push({
+      name: RESIDUAL_USERNAME_RULE,
+      // Deliberately broader than `replaceUsernameToken`'s boundary set. That
+      // function only treats `/ \ @ : whitespace " '` as boundaries so it
+      // does not tear apart a compound token like `dat-laptop` - correct for
+      // a REPLACEMENT, which must not mangle text it should leave alone. A
+      // SCAN is the opposite risk: it exists specifically to catch what the
+      // narrower replacement left behind, so it treats anything except an
+      // identifier-continuation character (letters, digits, `.`, `_`, `-`)
+      // as a boundary - a leftover username followed by a comma, a period or
+      // a closing paren is exactly the shape a replacement can plausibly
+      // miss, and none of those are valid boundaries under the narrower set.
+      pattern: new RegExp(`(?<![A-Za-z0-9._-])${escaped}(?![A-Za-z0-9._-])`, "i"),
+      description: "Residual OS account name that redaction did not remove",
+    });
+  }
+
+  const hostname = identity?.hostname ?? "";
+  if (hostname.length > 0) {
+    const short = hostname.split(".")[0] ?? "";
+    const alternatives =
+      short.length > 0 && short !== hostname
+        ? `(?:${escapeForRegExp(hostname)}|${escapeForRegExp(short)})`
+        : escapeForRegExp(hostname);
+    rules.push({
+      name: RESIDUAL_HOSTNAME_RULE,
+      // Lookbehind for the same reason the username rule uses one - the
+      // excerpt must be the hostname, not a leading boundary character.
+      pattern: new RegExp(`(?<=^|[^A-Za-z0-9.-])${alternatives}(?![A-Za-z0-9.-])`, "i"),
+      description: "Residual machine hostname that redaction did not remove",
+    });
+  }
+
+  return rules;
+}
+
 /** Extensions never read as text by `scanBundleDir`. */
 const BINARY_EXTENSIONS = new Set([
   ".png",
@@ -221,13 +316,17 @@ function mask(match: string): string {
  *
  * Pure: no filesystem, no throwing, no shared regex state. `file` is echoed
  * into each finding untouched, so the caller decides what path shape to report.
+ *
+ * `identity`, when supplied, adds the residual-username / residual-hostname
+ * backstop rules (see `identityRules`) - a caller with nothing to check
+ * against gets exactly the old parameterless behavior.
  */
-export function scanText(text: string, file: string): ScanFinding[] {
+export function scanText(text: string, file: string, identity?: KnownIdentity): ScanFinding[] {
   const findings: ScanFinding[] = [];
   const seen = new Set<string>();
   const lines = text.split(/\r?\n/);
 
-  for (const rule of SCAN_RULES) {
+  for (const rule of [...SCAN_RULES, ...identityRules(identity)]) {
     const global = new RegExp(rule.pattern.source, `${rule.pattern.flags}g`);
     for (let i = 0; i < lines.length; i += 1) {
       const line = lines[i] ?? "";
@@ -275,8 +374,10 @@ function walk(dir: string, prefix: string, out: string[]): void {
  * file skipped because it was unreadable would report exactly the same as a file
  * that was read and found innocent. A gate that cannot look must not answer
  * "clean" - it fails closed instead.
+ *
+ * `identity` is forwarded to `scanText` for every file - see its doc comment.
  */
-export function scanBundleDir(dir: string): ScanFinding[] {
+export function scanBundleDir(dir: string, identity?: KnownIdentity): ScanFinding[] {
   let stats;
   try {
     stats = statSync(dir);
@@ -302,7 +403,7 @@ export function scanBundleDir(dir: string): ScanFinding[] {
       findings.push(unreadable(rel, `file cannot be read, so it was never scanned: ${reason(err)}`));
       continue;
     }
-    findings.push(...scanText(text, rel));
+    findings.push(...scanText(text, rel, identity));
   }
   return findings;
 }
@@ -330,7 +431,7 @@ function replaceLiteral(text: string, needle: string, replacement: string): stri
  */
 function replaceUsernameToken(text: string, username: string): string {
   if (username.length === 0) return text;
-  const escaped = username.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const escaped = escapeForRegExp(username);
   // Case-insensitive: a transcript can quote the username exactly as the OS
   // capitalized it (`DAT`, `Dat`), not only in the case the caller supplied.
   const re = new RegExp(`(^|[/\\\\@:\\s"'])${escaped}(?=[/\\\\@:\\s"']|$)`, "gi");
@@ -346,7 +447,7 @@ function replaceUsernameToken(text: string, username: string): string {
  */
 function replaceHostnameToken(text: string, host: string): string {
   if (host.length === 0) return text;
-  const escaped = host.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const escaped = escapeForRegExp(host);
   // Case-insensitive: `hostname()` reports whatever case the OS stored, but a
   // transcript can quote the same machine in a different case (a log line, a
   // pasted prompt), and a case-mismatched leftover is a silent scan bypass.
@@ -431,8 +532,10 @@ export function stripUrlCredentials(text: string): string {
   // remote there is, and rewriting it would destroy the one fact the reader
   // needs. A username that IS a token (`https://ghp_.../@github.com`) is caught
   // by the vendor-prefix rules instead, which fire wherever the token appears.
+  // Same bounded scheme quantifier as `url-credentials`, and for the same
+  // reason: unbounded, this is the identical catastrophic-backtracking shape.
   return text.replace(
-    /\b([a-z][a-z0-9+.-]*:\/\/)[^/\s:@]+:[^/\s@]*@/gi,
+    /\b([a-z][a-z0-9+.-]{0,20}:\/\/)[^/\s:@]+:[^/\s@]*@/gi,
     (_match, scheme: string) => `${scheme}${CREDENTIAL_PLACEHOLDER}@`,
   );
 }

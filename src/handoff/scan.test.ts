@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { SCAN_RULES, UNREADABLE_RULE, rewritePaths, scanBundleDir, scanText, stripUrlCredentials } from "./scan.js";
+import type { KnownIdentity } from "./scan.js";
 
 function rules(text: string): string[] {
   return scanText(text, "f.md").map((f) => f.rule);
@@ -317,6 +318,106 @@ describe("scanText — hits and near-misses per rule", () => {
     expect(fires("${HOME}/Documents/notes.md", "abs-home-path")).toBe(false);
     expect(fires("${REPO_ROOT}/src/app.ts", "abs-home-path")).toBe(false);
     expect(fires("look under /Users for the account list", "abs-home-path")).toBe(false);
+  });
+});
+
+describe("scanText — known-identity residual backstop", () => {
+  // rewritePaths only removes the hostname/username it is TOLD about. If a
+  // replacement is ever missed (case mismatch, an occurrence rewritePaths
+  // does not cover), the scan pass that runs afterward had no way to catch
+  // it - a silent identity leak, since an empty finding list reads as
+  // "clean, safe to publish". These pin the backstop that closes that gap.
+
+  it("flags a residual OS username when the caller supplies it", () => {
+    const identity: KnownIdentity = { username: "datnguyen" };
+    expect(scanText("still signed in as datnguyen on the box", "f.md", identity)).toEqual([
+      { rule: "residual-username", file: "f.md", line: 1, excerpt: "datn..." },
+    ]);
+  });
+
+  it("flags a residual non-.local corporate hostname when the caller supplies it", () => {
+    const identity: KnownIdentity = { hostname: "build-worker-07.corp.example.com" };
+    expect(fires("ran on build-worker-07.corp.example.com again", "residual-hostname")).toBe(false);
+    expect(
+      scanText("ran on build-worker-07.corp.example.com again", "f.md", identity).map((f) => f.rule),
+    ).toContain("residual-hostname");
+  });
+
+  it("flags the short form of a residual hostname too", () => {
+    const identity: KnownIdentity = { hostname: "build-worker-07.corp.example.com" };
+    const hits = scanText("ran on build-worker-07 again", "f.md", identity);
+    expect(hits.map((f) => f.rule)).toContain("residual-hostname");
+  });
+
+  it("username and hostname backstops are case-insensitive, matching the rewrite they backstop", () => {
+    const identity: KnownIdentity = { username: "datnguyen", hostname: "build-worker-07" };
+    expect(fires2("Signed in as DATNGUYEN", identity)).toContain("residual-username");
+    expect(fires2("host BUILD-WORKER-07 responded", identity)).toContain("residual-hostname");
+  });
+
+  it("does not fire when no identity is supplied - parameterless behavior is unchanged", () => {
+    expect(scanText("still signed in as datnguyen on the box", "f.md")).toEqual([]);
+  });
+
+  it("does not fire on an ordinary bundle with no leftover identity", () => {
+    const identity: KnownIdentity = { username: "datnguyen", hostname: "build-worker-07.corp.example.com" };
+    const clean = "A normal handoff brief about the task-list, nothing machine-specific.";
+    expect(scanText(clean, "f.md", identity)).toEqual([]);
+  });
+
+  it("does not rewrite/fire inside a longer word that merely contains the username", () => {
+    const identity: KnownIdentity = { username: "dat" };
+    expect(scanText("the dataset was validated; datadog alerts fired", "f.md", identity)).toEqual([]);
+  });
+
+  it("skips the residual-username backstop for a short username to avoid false positives on prose", () => {
+    // A 2-char username like "am" or "hi" is also common English - a bounded
+    // word-boundary match still fires on "I am" or "hi there" on every line
+    // of ordinary text. The trade-off taken here: usernames shorter than 3
+    // characters are not backstopped by the scanner (the rewrite itself
+    // still redacts them via rewritePaths - only the belt-and-suspenders
+    // scan check is skipped), since a noisy scanner that blocks legitimate
+    // prose gets ignored, which is worse than no backstop for that one case.
+    const identity: KnownIdentity = { username: "am" };
+    expect(scanText("I am happy to help, am I right?", "f.md", identity)).toEqual([]);
+  });
+
+  function fires2(text: string, identity: KnownIdentity): string[] {
+    return scanText(text, "f.md", identity).map((f) => f.rule);
+  }
+});
+
+describe("scanBundleDir — known-identity residual backstop", () => {
+  const dirs: string[] = [];
+
+  function makeDir(): string {
+    const dir = mkdtempSync(join(tmpdir(), "lg-scan-identity-"));
+    dirs.push(dir);
+    return dir;
+  }
+
+  afterEach(() => {
+    while (dirs.length > 0) {
+      const dir = dirs.pop();
+      if (dir) rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("threads the identity through to every file scanned", () => {
+    const dir = makeDir();
+    writeFileSync(join(dir, "clean.md"), "nothing to see here\n", "utf8");
+    writeFileSync(join(dir, "leak.md"), "still logged in as datnguyen\n", "utf8");
+
+    const findings = scanBundleDir(dir, { username: "datnguyen" });
+    expect(findings.map((f) => ({ rule: f.rule, file: f.file }))).toEqual([
+      { rule: "residual-username", file: "leak.md" },
+    ]);
+  });
+
+  it("reports clean with no identity supplied (unchanged parameterless behavior)", () => {
+    const dir = makeDir();
+    writeFileSync(join(dir, "leak.md"), "still logged in as datnguyen\n", "utf8");
+    expect(scanBundleDir(dir)).toEqual([]);
   });
 });
 
@@ -645,6 +746,23 @@ describe("scanText - performance", () => {
     // Regression guard: the env-assignment prefix used to rescan to end-of-line at
     // every offset, which made this line take ~9 seconds.
     const line = "a".repeat(65536);
+    const started = performance.now();
+    const findings = scanText(line, "big.md");
+    const elapsedMs = performance.now() - started;
+    expect(findings).toEqual([]);
+    expect(elapsedMs).toBeLessThan(2000);
+  });
+
+  it("scans a 100k-char hyphen-run line with no credentials in well under two seconds", () => {
+    // Regression guard: url-credentials' scheme quantifier was unbounded
+    // (`[a-z][a-z0-9+.-]*`), so a long hyphen/dot-separated token with no
+    // `://` anywhere made the engine greedily consume to end of line and
+    // then backtrack one character at a time at every word-boundary start -
+    // O(n) backtrack times O(n) starts. This exact shape (no scheme, no
+    // credentials, just a repeated hyphenated token) took ~4.2s before the
+    // fix; a plausible accidental line in any transcript, trivial to craft
+    // on purpose.
+    const line = "abc-def-ghi-jkl-".repeat(6250); // 100,000 chars
     const started = performance.now();
     const findings = scanText(line, "big.md");
     const elapsedMs = performance.now() - started;
