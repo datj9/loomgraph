@@ -223,6 +223,57 @@ describe("execute", () => {
     expect(store.load("run1")!.completed).toEqual(["a", "b", "c"]);
   });
 
+  it("accumulates node runs and spend across a resume", async () => {
+    const src = `
+name: acc
+budget: { maxUsd: 10, maxWallClockSec: 600, maxNodeRuns: 100 }
+nodes:
+  a: { type: command, run: "echo a" }
+  b: { type: command, run: "echo b" }
+  c: { type: command, run: "echo c" }
+  d: { type: command, run: "echo d" }
+  e: { type: command, run: "echo e" }
+edges:
+  - { from: a, to: b }
+  - { from: b, to: c }
+  - { from: c, to: d }
+  - { from: d, to: e }
+  - { from: e, to: END }
+`;
+    const graph = parseGraph(src);
+
+    // Segment one: a and b run, then the process is killed mid-c.
+    const killing = {
+      command: stub("command", (i) => {
+        if (i.prompt === "echo c") throw new Error("SENTINEL kill");
+        return ok(i.prompt, 0.25);
+      }),
+    };
+    await expect(execute(graph, start(src), deps(killing))).rejects.toThrow(/SENTINEL/);
+
+    const checkpoint = store.load("run1")!;
+    expect(checkpoint.completed).toEqual(["a", "b"]);
+    expect(checkpoint.spent.nodeRuns).toBe(2);
+    expect(checkpoint.spent.usd).toBeCloseTo(0.5, 10);
+
+    // The attempt that was in flight when the process died emitted a
+    // node_started but was never committed, so it is not billed. That gap -
+    // not a reset of the counters - is why an event count can run ahead of
+    // spent.nodeRuns across a kill/resume cycle.
+    expect(log.read("run1").filter((e) => e.kind === "node_started")).toHaveLength(3);
+
+    // Segment two: c, d and e run on the resumed checkpoint.
+    const working = { command: stub("command", (i) => ok(i.prompt, 0.25)) };
+    const final = await execute(graph, checkpoint, deps(working));
+
+    expect(final.status).toBe("succeeded");
+    // The counters are cumulative across both segments, the way wall-clock
+    // already is: 2 runs before the kill plus 3 after.
+    expect(final.spent.nodeRuns).toBe(5);
+    expect(final.spent.usd).toBeCloseTo(1.25, 10);
+    expect(store.load("run1")!.spent.nodeRuns).toBe(5);
+  });
+
   it("resumes after a crash without re-running completed nodes", async () => {
     const calls: Record<string, number> = { a: 0, b: 0, c: 0 };
     const crashing = {
