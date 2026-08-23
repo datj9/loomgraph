@@ -73,6 +73,44 @@ function killGroup(pid: number | undefined, signal: NodeJS.Signals): void {
   }
 }
 
+// -- Parent-exit cleanup ----------------------------------------------------
+//
+// `detached: true` (see runProcess below) makes each child its own
+// process-group leader. That is required for killGroup to reach grandchildren,
+// but it comes at a cost documented by execa: `cleanup` (which would normally
+// kill the child when this process exits) does not apply to detached
+// children, and the child is no longer in this terminal's foreground process
+// group, so a Ctrl-C here no longer reaches it either. Both mechanisms that
+// used to stop a run when the parent went away are gone, so this module tracks
+// every live child itself and kills its group on the parent's own exit,
+// SIGINT, or SIGTERM.
+const liveChildPids = new Set<number>();
+let lifecycleHandlersInstalled = false;
+
+function installLifecycleHandlersOnce(): void {
+  if (lifecycleHandlersInstalled) return;
+  lifecycleHandlersInstalled = true;
+
+  const killAllLiveChildren = (signal: NodeJS.Signals): void => {
+    for (const pid of liveChildPids) killGroup(pid, signal);
+  };
+
+  // Synchronous last resort: whatever caused this process to exit, nothing
+  // tracked here should be left running. No time for a graceful SIGTERM here
+  // - `exit` handlers cannot do async work - so this goes straight to SIGKILL.
+  process.on("exit", () => killAllLiveChildren("SIGKILL"));
+
+  // SIGINT/SIGTERM get a real handler so the signal is still acted on rather
+  // than swallowed: clean up tracked children, then terminate this process
+  // with the conventional exit code for the signal that arrived.
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    process.on(signal, () => {
+      killAllLiveChildren("SIGTERM");
+      process.exit(signal === "SIGINT" ? 130 : 143);
+    });
+  }
+}
+
 /**
  * Spawn a child process with a timeout that actually aborts the run.
  *
@@ -97,6 +135,8 @@ export async function runProcess(
   args: string[],
   options: ProcessRunOptions,
 ): Promise<ProcessRunResult> {
+  installLifecycleHandlersOnce();
+
   const child = execa(file, args, {
     cwd: options.cwd,
     reject: false,
@@ -107,6 +147,8 @@ export async function runProcess(
     input: options.input ?? "",
     detached: true,
   });
+
+  if (child.pid !== undefined) liveChildPids.add(child.pid);
 
   let timedOut = false;
   let escalation: NodeJS.Timeout | undefined;
@@ -137,7 +179,14 @@ export async function runProcess(
 
     return { stdout, stderr, exitCode: result.exitCode, timedOut, spawnErrorCode };
   } finally {
+    // `await child` only needs the direct child's pipes to close, which a
+    // grandchild that ignores SIGTERM (and does not hold those pipes) has no
+    // effect on. Clearing `deadline` is always safe - the run is over either
+    // way - but `escalation`, when scheduled, must NOT be cleared here: it is
+    // the only thing left that will still SIGKILL a stubborn grandchild after
+    // this promise settles. It is unref'd and one-shot, so leaving it armed
+    // costs nothing when the group already died from the SIGTERM.
     clearTimeout(deadline);
-    if (escalation !== undefined) clearTimeout(escalation);
+    if (child.pid !== undefined) liveChildPids.delete(child.pid);
   }
 }
