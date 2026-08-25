@@ -1,7 +1,6 @@
 import { resolveMember } from "./auth.js";
 import type { HubStore } from "./storage.js";
 import { MAX_BODY_BYTES, eventBatchSchema } from "./wire.js";
-import { VERSION } from "../index.js";
 
 export interface WireRequest {
   method: string;
@@ -31,39 +30,58 @@ function segments(path: string): string[] {
   return path.split("/").filter((s) => s.length > 0);
 }
 
-/**
- * `member` is attributed server-side from the token, never honored from the
- * request body. The batch schema is strict and has no `member` field, so a body
- * that happens to carry one must have it removed before validation or the
- * whole batch is refused as an unknown key.
- */
-function withoutMember(body: unknown): unknown {
-  if (typeof body === "object" && body !== null && !Array.isArray(body)) {
-    const copy = { ...(body as Record<string, unknown>) };
-    delete copy.member;
-    return copy;
-  }
-  return body;
-}
-
 const bearer = (req: WireRequest): string | undefined => req.headers.authorization;
+
+/**
+ * An identity disagreement between two places a batch names the same run. These
+ * are the only zod refusals that report `run identity mismatch`; everything
+ * else the schema refuses is a plain `bad request`. The `state`/`events` paths
+ * and the event-line message come from `eventBatchSchema` in wire.ts - do not
+ * reword them here or the distinguisher for the message-coupled case silently
+ * degrades.
+ */
+function isIdentityMismatch(issues: readonly { path: readonly PropertyKey[]; message: string }[]): boolean {
+  return issues.some(
+    (issue) =>
+      (issue.path.length === 2 &&
+        issue.path[0] === "state" &&
+        issue.path[1] === "runId") ||
+      (issue.path.length === 2 &&
+        issue.path[0] === "state" &&
+        issue.path[1] === "graphName") ||
+      (issue.path.length === 4 &&
+        issue.path[0] === "state" &&
+        issue.path[1] === "nodes" &&
+        issue.path[3] === "nodeId") ||
+      (issue.path.length === 2 &&
+        issue.path[0] === "events" &&
+        typeof issue.path[1] === "number" &&
+        issue.message.includes("runId")),
+  );
+}
 
 export function handle(req: WireRequest, deps: HandlerDeps): WireResponse {
   const seg = segments(req.path);
 
   if (req.method === "GET" && seg.length === 2 && seg[0] === "v1" && seg[1] === "health") {
-    return { status: 200, body: { ok: true, version: VERSION } };
+    return { status: 200, body: { ok: true, version: deps.version } };
   }
 
   if (req.method === "POST" && seg.length === 2 && seg[0] === "v1" && seg[1] === "events") {
-    if (JSON.stringify(req.body ?? null).length > MAX_BODY_BYTES) {
+    const json = JSON.stringify(req.body ?? null);
+    if (Buffer.byteLength(json, "utf8") > MAX_BODY_BYTES) {
       return error(413, "body too large");
     }
     const member = resolveMember(deps.store, bearer(req));
     if (member === null) return error(401, "unauthorized");
     if (!member.scopes.includes("ingest")) return error(403, "forbidden");
-    const parsed = eventBatchSchema.safeParse(withoutMember(req.body));
-    if (!parsed.success) return error(400, "run identity mismatch");
+    const parsed = eventBatchSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return error(
+        400,
+        isIdentityMismatch(parsed.error.issues) ? "run identity mismatch" : "bad request",
+      );
+    }
     const result = deps.store.ingest(member.member, parsed.data);
     if (result.conflict) {
       return error(409, "seq conflict", { runId: result.runId, seq: result.seq });

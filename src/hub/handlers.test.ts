@@ -72,11 +72,13 @@ function mint(store: HubStore, member: string, scopes: string[]): string {
 }
 
 describe("hub handlers", () => {
-  it("1. health responds without a token", () => {
+  it("1. health responds without a token and reports deps.version", () => {
     const store = openStore();
-    const res = handle({ method: "GET", path: "/v1/health", query: {}, headers: {}, body: undefined }, makeDeps(store));
+    const deps = makeDeps(store);
+    deps.version = "9.9.9-test";
+    const res = handle({ method: "GET", path: "/v1/health", query: {}, headers: {}, body: undefined }, deps);
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ ok: true, version: VERSION });
+    expect(res.body).toEqual({ ok: true, version: "9.9.9-test" });
   });
 
   it("2. every other route 401s without a token", () => {
@@ -136,17 +138,64 @@ describe("hub handlers", () => {
     expect(store.listRuns()).toHaveLength(0);
   });
 
-  it("7. a batch carrying member: someone-else in the body still stores under the token's member", () => {
+  it("6b. an over-cap body measured in bytes is 413 even when its code-unit length is under the cap", () => {
+    const store = openStore();
+    const token = mint(store, "alice", ["ingest"]);
+    const deps = makeDeps(store);
+    const threeByte = "界"; // 3 bytes in UTF-8, 1 code unit
+    const n = Math.floor(MAX_BODY_BYTES / 3) + 1;
+    expect(threeByte.repeat(n).length).toBeLessThan(MAX_BODY_BYTES);
+    const body = batchBody("run-1", "s-1", [], baseState(), { extra: threeByte.repeat(n) });
+    const res = authed("POST", "/v1/events", deps, token, {}, body);
+    expect(res.status).toBe(413);
+    expect(res.body).toEqual({ error: "body too large" });
+    expect(store.listRuns()).toHaveLength(0);
+  });
+
+  it("6c. an event line whose runId disagrees with the batch reports run identity mismatch", () => {
+    const store = openStore();
+    const token = mint(store, "alice", ["ingest"]);
+    const deps = makeDeps(store);
+    const body = batchBody("run-1", "s-1", [evLine({ seq: 0, runId: "other-run" })], baseState("run-1"));
+    const res = authed("POST", "/v1/events", deps, token, {}, body);
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: "run identity mismatch" });
+    expect(store.listRuns()).toHaveLength(0);
+  });
+
+  it("6d. a schema refusal that is not an identity disagreement reports bad request", () => {
+    const store = openStore();
+    const token = mint(store, "alice", ["ingest"]);
+    const deps = makeDeps(store);
+    const body = batchBody("run-1", "s-1", [evLine({ seq: 0 })], baseState(), { youAreNotValid: true });
+    const res = authed("POST", "/v1/events", deps, token, {}, body);
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: "bad request" });
+    expect(store.listRuns()).toHaveLength(0);
+  });
+
+  it("7. a batch carrying an unknown member key in the body is 400 and stores nothing", () => {
     const store = openStore();
     const token = mint(store, "alice", ["ingest"]);
     const deps = makeDeps(store);
     const body = batchBody("run-1", "s-1", [evLine({ seq: 0 })], baseState(), { member: "someone-else" });
     const res = authed("POST", "/v1/events", deps, token, {}, body);
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: "bad request" });
+    expect(store.listRuns()).toHaveLength(0);
+    expect(store.listRuns("alice")).toHaveLength(0);
+  });
+
+  it("7b. a valid batch with no stray member key stores under the token's member", () => {
+    const store = openStore();
+    const token = mint(store, "alice", ["ingest"]);
+    const deps = makeDeps(store);
+    const body = batchBody("run-1", "s-1", [evLine({ seq: 0 })], baseState());
+    const res = authed("POST", "/v1/events", deps, token, {}, body);
     expect(res.status).toBe(200);
     const runs = store.listRuns("alice");
     expect(runs).toHaveLength(1);
     expect(runs[0]!.member).toBe("alice");
-    expect(store.listRuns("someone-else")).toHaveLength(0);
   });
 
   it("8. reading another member's run returns their data unmodified", () => {
@@ -257,10 +306,12 @@ describe("hub handlers", () => {
     expect(res.body).toEqual({ conflict: false, highWaterSeq: NO_EVENTS_YET, accepted: 0, duplicates: 0 });
   });
 
-  it("19. health's body contains the VERSION imported from src/index.ts, not a literal", () => {
+  it("19. health reports deps.version, not a literal or the imported VERSION", () => {
     const store = openStore();
-    const res = handle({ method: "GET", path: "/v1/health", query: {}, headers: {}, body: undefined }, makeDeps(store));
-    expect((res.body as { version: string }).version).toBe(VERSION);
+    const deps = makeDeps(store);
+    deps.version = "7.8.9-lab";
+    const res = handle({ method: "GET", path: "/v1/health", query: {}, headers: {}, body: undefined }, deps);
+    expect((res.body as { version: string }).version).toBe("7.8.9-lab");
     expect(VERSION).toBe("0.1.0");
   });
 

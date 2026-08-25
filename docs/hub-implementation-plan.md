@@ -416,9 +416,10 @@ Anything else is 404. A token that resolves but lacks the route's scope is 403
   must not reveal whether the body was valid, a 413 must not require parsing the body, and a
   403 must not reveal whether the body was valid either.
 - Every error body is exactly `{ error: string }`, plus fields where named below.
-- 401 `{error:"unauthorized"}`. 404 `{error:"not found"}`. 400 `{error:"bad request"}` for
-  an unparseable body or an undecodable cursor. 413 `{error:"body too large"}` when the
-  serialized body exceeds `MAX_BODY_BYTES`. 409 `{error:"seq conflict", runId, seq}`.
+- 401 `{error:"unauthorized"}`. 404 `{error:"not found"}`. 400 `{error:"bad request"}` is the
+  general case for any body `eventBatchSchema` refuses or an undecodable cursor; the specific
+  case `400 {error:"run identity mismatch"}` is described below. 413 `{error:"body too large"}`
+  when the serialized body exceeds `MAX_BODY_BYTES` in bytes. 409 `{error:"seq conflict", runId, seq}`.
 - 403 `{error:"forbidden"}` when the token resolves but lacks the route's scope.
 - A batch failing `eventBatchSchema`'s cross-field check — `state.runId` or
   `state.graphName` disagreeing with the top-level value — is 400
@@ -426,7 +427,11 @@ Anything else is 404. A token that resolves but lacks the route's scope is 403
   must not store any part of the batch.
 - A `nodes` entry whose map key disagrees with its `nodeId` is the same 400
   `{error:"run identity mismatch"}` as a `runId` or `graphName` mismatch, and stores nothing.
-- The same 400 covers every incoherence the schema refuses: a `seq` that is not strictly
+- Every other incoherence the schema refuses is 400 `{error:"bad request"}` - the mismatch
+  message is reserved for an actual identity disagreement, identified from the zod issue path
+  (`state.runId`, `state.graphName`, `state.nodes.<key>.nodeId`, or an `events.<n>` runId
+  disagreement). Reporting a mismatch that did not happen is a debugging dead end. The list
+  below is 400s, not mismatches: a `seq` that is not strictly
   increasing across the batch, an event line whose own `runId` disagrees with the batch's, a
   `completed` id absent from `nodes`, a duplicate in `varKeys`, and any out-of-range numeric.
   All of them store nothing.
