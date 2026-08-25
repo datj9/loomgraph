@@ -140,6 +140,18 @@ describe("readySet", () => {
   });
 });
 
+describe("newRunState", () => {
+  it("mints a uuid-shaped streamId on every fresh run", () => {
+    const state = start(LINEAR);
+    expect(state.streamId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+    expect(state.streamId).not.toBe("");
+  });
+
+  it("two fresh runs from the same graph have different streamIds", () => {
+    expect(start(LINEAR).streamId).not.toBe(start(LINEAR).streamId);
+  });
+});
+
 describe("checkCommandExpectations", () => {
   const check = (engine as unknown as {
     checkCommandExpectations: (
@@ -170,6 +182,19 @@ describe("checkCommandExpectations", () => {
 });
 
 describe("execute", () => {
+  it("run_started event data carries the streamId", async () => {
+    const registry = { command: stub("command", (i) => ok(i.prompt)) };
+    const state = start(LINEAR);
+    const seen: { started?: Record<string, unknown> } = {};
+    const onEvent = (e: import("./events.js").LgEvent) => {
+      if (e.kind === "run_started") seen.started = e.data;
+    };
+
+    await execute(parseGraph(LINEAR), state, deps(registry, { onEvent }));
+
+    expect(seen.started?.streamId).toBe(state.streamId);
+  });
+
   it("runs a linear graph in order and succeeds", async () => {
     const order: string[] = [];
     const registry = { command: stub("command", (i) => { order.push(i.prompt); return ok(i.prompt); }) };

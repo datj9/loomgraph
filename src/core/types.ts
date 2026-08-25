@@ -26,6 +26,10 @@ export interface NodeResult {
 
 export interface RunState {
   runId: string;
+  /** Identifies THIS machine's history of the run, so a wiped or copied
+   *  `.loomgraph` produces a different stream rather than a same-key conflict
+   *  on the hub. */
+  streamId: string;
   graphName: string;
   status: RunStatus;
   createdAt: string;

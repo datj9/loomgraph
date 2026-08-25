@@ -497,16 +497,23 @@ Tests: `refuseBind` only. Keep the rest thin enough that "untested wiring" stays
 - `streamId: string` added to `RunState` in `src/core/types.ts`.
 - Minted in `newRunState` (`src/core/engine.ts`) with `crypto.randomUUID()`, so every call
   site inherits it, and included in the `run_started` event data emitted by `execute()`.
-- **Backfill once, in `CheckpointStore.load`:** when `streamId` is absent, mint one **and
-  re-save the checkpoint before returning**. Generating per-load would give a resumed run a
-  fresh stream on every load and push old events under a new key — precisely the divergence
-  `streamId` exists to prevent.
-- **Four test files construct `RunState` literals and will fail typecheck** — update all
-  four: `src/core/store.test.ts`, `src/commands/status.test.ts`,
-  `src/commands/report.test.ts`, `src/core/budget.test.ts`.
+- **Backfill deterministically, in `CheckpointStore.load`, WITHOUT re-saving:** when `streamId`
+  is absent, derive it in memory as a uuid-formatted rendering of
+  `sha256("legacy:" + runId)` (first 32 hex chars formatted 8-4-4-4-12) and write nothing. It
+  is deterministic, so every load of the same legacy run agrees. The next legitimate `save()`
+  persists it as a side effect of ordinary work. Do NOT restore the re-save approach, which is
+  wrong three ways: (1) `save` calls `load`, so backfilling inside `load` by calling `save` is
+  mutual recursion; (2) `save` sets `seq: prev.seq + 1`, so a read would advance the checkpoint
+  generation counter; (3) `save` stamps `updatedAt = now`, so merely running `lg status` or
+  `lg ls` would mark an untouched run as modified.
+- **Seven test files construct `RunState` literals and will fail typecheck** — update all
+  seven: `src/core/store.test.ts`, `src/core/engine.test.ts`, `src/core/budget.test.ts`,
+  `src/core/graph.test.ts`, `src/commands/status.test.ts`, `src/commands/report.test.ts`,
+  `src/commands/plan.test.ts`.
 
-Tests: a fresh run has one; two runs differ; resume preserves it; loading a checkpoint
-written without the field mints one, persists it, and a second load returns the same value.
+Tests: a fresh run has one; two runs differ; resume preserves it; loading a checkpoint written
+without the field derives one deterministically (a second load returns the same value) and does
+not write to disk or change `seq`/`updatedAt`; the `run_started` event data carries it.
 
 ### 1.10 `feat: project run state before it leaves the machine`
 
@@ -765,7 +772,7 @@ implementation is wrong in a way tests do not catch by default.
 | 1.6 auth | **Delegate** | Small and sharply testable; `timingSafeEqual` and the hash input are named |
 | 1.7 handlers | **Delegate** | Pure routing over a defined store; error shapes given |
 | 1.8 bin | Delegate, **review** | `server.ts` is untested, so drift is invisible; check the shebang and that it stayed dumb |
-| 1.9 streamId | **Do not delegate** | Cross-cutting required field: `types.ts`, `engine.ts`, four test files, and a backfill-persistence subtlety whose failure mode is a fresh stream per load |
+| 1.9 streamId | **Do not delegate** | Cross-cutting required field: `types.ts`, `engine.ts`, seven test files, and a backfill-persistence subtlety whose failure mode is a fresh stream per load |
 | 1.10 state projection | **Do not delegate** | The phase's security property. A projection that looks right but keeps one field publishes secrets, and only a planted-secret test catches it |
 | 1.11 transport/sync | **Delegate** | Well-bounded once `EventBatch` exists and the never-rejects contract is explicit |
 | 1.12 enroll/sync cmds | **Delegate** | Thin commander wiring with an existing precedent |

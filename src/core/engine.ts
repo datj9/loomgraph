@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { isAbsolute, resolve } from "node:path";
 import type { Adapter, AdapterOutput } from "../adapters/types.js";
 import type { AdapterRegistry } from "../adapters/registry.js";
@@ -38,6 +39,7 @@ export function newRunState(
   const now = new Date().toISOString();
   return {
     runId: opts.runId,
+    streamId: randomUUID(),
     graphName: graph.name,
     status: "pending",
     createdAt: now,
@@ -182,7 +184,7 @@ export async function execute(graph: Graph, initial: RunState, deps: EngineDeps)
   const resumed = state.completed.length > 0 || state.status === "paused";
   state.status = "running";
   state = store.save(state);
-  emit({ kind: "run_started", data: { graph: graph.name, resumed, cwd: state.cwd } });
+  emit({ kind: "run_started", data: { graph: graph.name, resumed, cwd: state.cwd, streamId: state.streamId } });
 
   const finish = (status: "succeeded" | "failed", error: string | null): RunState => {
     state.status = status;
