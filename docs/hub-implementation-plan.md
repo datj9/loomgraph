@@ -150,7 +150,7 @@ export interface FeedItem { ts: string; member: string; kind: FeedKind; ref: str
 export type FeedKind = "run_started" | "run_finished" | "brief_published"
   | "inbox_sent" | "inbox_accepted";      // phases 2-3 use the later members
 export interface RunRow { member: string; runId: string; streamId: string;
-  graphName: string; status: string; updatedAt: string; receivedAt: string }
+  graphName: string; status: RunStatus; updatedAt: string; receivedAt: string }
 export const MAX_BODY_BYTES = 5 * 1024 * 1024;
 export const eventBatchSchema = /* zod, strict, plus the cross-field refinement below */;
 ```
@@ -261,6 +261,10 @@ Rules an executor must not resolve differently:
   a conflict as a success. Never widen this back to a union whose success arm lacks the tag -
   the whole point is that forgetting the check becomes a type error rather than an acked batch
   that was never stored.
+- **`RunRow.status` is `RunStatus`, not `string`.** It is the same union the engine produces and
+  that `ProjectedState.status` carries, so a `switch` over it stays exhaustive and the hub can
+  never surface a status the engine never emitted. Do not widen it to accommodate a value the
+  engine does not have - add the value to `RunStatus` instead.
 - The hash chain is global. `chain_head` is a one-row table updated inside the ingest
   transaction; `row_hash = sha256(prev_hash || json)`; genesis `prev_hash` is 32 zero bytes.
 - Cursors are opaque base64 of `{receivedAt, rowid}`, keyset over `(received_at, rowid)`.

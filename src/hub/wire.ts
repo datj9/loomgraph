@@ -82,7 +82,9 @@ export interface RunRow {
   runId: string;
   streamId: string;
   graphName: string;
-  status: string;
+  // The same union `ProjectedState.status` and the engine's `RunStatus` use, so a `switch`
+  // over it stays exhaustive and the hub cannot surface a status the engine never produces.
+  status: RunStatus;
   updatedAt: string;
   receivedAt: string;
 }

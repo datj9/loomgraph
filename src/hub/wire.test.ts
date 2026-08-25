@@ -8,6 +8,7 @@ import {
   type IngestResult,
   type ProjectedNode,
   type ProjectedState,
+  type RunRow,
 } from "./wire.js";
 
 const rawLine =
@@ -385,5 +386,38 @@ describe("ingest result union", () => {
     };
     expect(ingestTag(success)).toBe(7);
     expect(ingestTag(conflict)).toBe(3);
+  });
+});
+
+describe("RunRow status", () => {
+  function runRowStatus(row: RunRow): number {
+    switch (row.status) {
+      case "pending":
+        return 0;
+      case "running":
+        return 1;
+      case "paused":
+        return 2;
+      case "succeeded":
+        return 3;
+      case "failed":
+        return 4;
+    }
+  }
+
+  it("switches exhaustively over the status union, like the ingest union test", () => {
+    const base: RunRow = {
+      member: "m",
+      runId: "run-1",
+      streamId: "s-1",
+      graphName: "g",
+      status: "running",
+      updatedAt: "2026-08-25T00:00:00.000Z",
+      receivedAt: "2026-08-25T00:00:00.000Z",
+    };
+    expect(runRowStatus({ ...base, status: "pending" })).toBe(0);
+    expect(runRowStatus(base)).toBe(1);
+    expect(runRowStatus({ ...base, status: "succeeded" })).toBe(3);
+    expect(runRowStatus({ ...base, status: "failed" })).toBe(4);
   });
 });
