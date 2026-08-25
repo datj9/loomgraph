@@ -91,6 +91,50 @@ export interface RunRow {
 
 export const MAX_BODY_BYTES = 5 * 1024 * 1024;
 
+// Bounds on projected-state sizes. The engine can never exceed these: a graph is
+// validated before it runs and a run has one row per node, so each ceiling is well above
+// what a real RunState produces while still bounding what a single push can carry.
+export const MAX_VAR_KEYS = 256; // at most this many distinct var names in one state
+export const MAX_NODES = 1000; // at most this many nodes in one run
+export const MAX_ATTEMPTS = 1000; // at most this many attempts of a single node
+
+/**
+ * A timestamp the engine itself can write. Every `ts`, `createdAt`, `updatedAt`,
+ * `startedAt` and `endedAt` the engine produces comes from `new Date().toISOString()`,
+ * so requiring a value that round-trips through `toISOString()` is the real contract,
+ * not a tightening. Rejects "", whitespace, "banana" and control characters.
+ */
+const isoInstant = z
+  .string()
+  .refine((s) => {
+    const d = new Date(s);
+    return Number.isNaN(d.getTime()) ? false : d.toISOString() === s;
+  }, {
+    message: "must be an ISO-8601 instant that round-trips through toISOString()",
+  });
+
+/**
+ * An identity string the engine produces: non-empty after trimming and free of control
+ * characters (delimiters never belong in a run id, stream id, graph name or cwd).
+ */
+const identityString = z
+  .string()
+  .min(1)
+  .refine((s) => s.trim() !== "" && !rejectControl(s), {
+    message: "must be non-empty after trimming and contain no control characters",
+  });
+
+function rejectControl(s: string): boolean {
+  return /[\u0000-\u001f\u007f]/.test(s);
+}
+
+/** A node id the engine's graph parser (src/core/graph.ts) would accept. */
+const nodeIdString = z
+  .string()
+  .refine((id) => id !== "END" && /^[A-Za-z0-9_-]{1,64}$/.test(id), {
+    message: "must match [A-Za-z0-9_-] and be 1-64 characters, and may not be END",
+  });
+
 /**
  * The value of `highWaterSeq` when no event has ever been ingested for a
  * (member, streamId, runId). It is -1 rather than 0 or null because `seq` is
@@ -103,26 +147,32 @@ export const NO_EVENTS_YET = -1;
 
 const projectedNodeSchema = z
   .object({
-    nodeId: z.string(),
+    nodeId: nodeIdString,
     status: z.enum(["pending", "running", "succeeded", "failed", "skipped"]),
-    startedAt: z.string(),
-    endedAt: z.string().nullable(),
-    attempts: z.number().int().nonnegative(),
-    error: z.string().nullable(),
+    startedAt: isoInstant,
+    endedAt: isoInstant.nullable(),
+    attempts: z.number().int().min(1).max(MAX_ATTEMPTS),
+    error: z
+      .string()
+      .nullable()
+      .refine((s) => s === null || (s.trim() !== "" && !rejectControl(s)), {
+        message: "error must be null or a non-empty string",
+      }),
     costUsd: z.number().nonnegative(),
   })
   .strict();
 
 const projectedStateSchema = z
   .object({
-    runId: z.string().min(1),
-    graphName: z.string().min(1),
+    runId: identityString,
+    graphName: identityString,
     status: z.enum(["pending", "running", "paused", "succeeded", "failed"]),
-    createdAt: z.string(),
-    updatedAt: z.string(),
-    cwd: z.string(),
+    createdAt: isoInstant,
+    updatedAt: isoInstant,
+    cwd: identityString,
     varKeys: z
       .array(z.string())
+      .max(MAX_VAR_KEYS)
       .refine((keys) => new Set(keys).size === keys.length, {
         message: "varKeys must not contain duplicate entries",
       }),
@@ -140,8 +190,17 @@ const projectedStateSchema = z
         nodeRuns: z.number().int().nonnegative(),
       })
       .strict(),
-    nodes: z.record(z.string(), projectedNodeSchema),
-    completed: z.array(z.string()),
+    nodes: z
+      .record(nodeIdString, projectedNodeSchema)
+      .refine((n) => Object.keys(n).length <= MAX_NODES, {
+        message: `nodes must have at most ${MAX_NODES} entries`,
+      }),
+    completed: z
+      .array(z.string())
+      .max(MAX_NODES)
+      .refine((ids) => new Set(ids).size === ids.length, {
+        message: "completed must not contain duplicate entries",
+      }),
     seq: z.number().int().nonnegative(),
   })
   .strict();
@@ -156,7 +215,7 @@ const projectedStateSchema = z
  */
 const eventSchema = z
   .object({
-    ts: z.string(),
+    ts: isoInstant,
     runId: z.string(),
     seq: z.number().int().nonnegative(),
     kind: z.enum([
@@ -182,9 +241,9 @@ const eventSchema = z
  */
 export const eventBatchSchema = z
   .object({
-    runId: z.string().min(1),
-    streamId: z.string().min(1),
-    graphName: z.string().min(1),
+    runId: identityString,
+    streamId: identityString,
+    graphName: identityString,
     state: projectedStateSchema,
     events: z.array(
       // each element must parse to a valid LgEvent but stays a string on the wire
@@ -234,6 +293,20 @@ export const eventBatchSchema = z
           code: z.ZodIssueCode.custom,
           path: ["state", "nodes", key, "nodeId"],
           message: `state.nodes.${key}.nodeId (${value.nodeId}) does not match its map key (${key})`,
+        });
+      }
+      if (value.endedAt === null && value.status !== "pending" && value.status !== "running") {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["state", "nodes", key, "endedAt"],
+          message: `state.nodes.${key} is ${value.status} but has a null endedAt`,
+        });
+      }
+      if (value.endedAt !== null && value.endedAt < value.startedAt) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["state", "nodes", key, "endedAt"],
+          message: `state.nodes.${key} endedAt (${value.endedAt}) is earlier than its startedAt (${value.startedAt})`,
         });
       }
     }

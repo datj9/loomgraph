@@ -349,6 +349,243 @@ describe("eventBatchSchema", () => {
   it("still accepts a batch with no events", () => {
     expect(eventBatchSchema.safeParse(baseBatch({ events: [] })).success).toBe(true);
   });
+
+  const node = (overrides: Partial<ProjectedNode> = {}): ProjectedNode => ({
+    nodeId: "n1",
+    status: "succeeded",
+    startedAt: "2026-08-25T00:00:00.000Z",
+    endedAt: "2026-08-25T00:00:01.000Z",
+    attempts: 1,
+    error: null,
+    costUsd: 0.1,
+    ...overrides,
+  });
+
+  const withNode = (n: ProjectedNode) => {
+    const state = baseState();
+    state.nodes = { [n.nodeId]: n };
+    return baseBatch({ state });
+  };
+
+  describe("CLASS 1: timestamps must round-trip through toISOString", () => {
+    const bad = ["", "   ", "banana", "\u0001"];
+
+    it.each(bad)("rejects ts %j on an event line", (ts) => {
+      const line = rawLine.replace('"ts":"2026-08-25T00:00:00.000Z"', `"ts":${JSON.stringify(ts)}`);
+      expect(eventBatchSchema.safeParse(baseBatch({ events: [line] })).success).toBe(false);
+    });
+
+    it.each(bad)("rejects state.createdAt %j", (createdAt) => {
+      const state = { ...baseState(), createdAt } as ProjectedState;
+      expect(eventBatchSchema.safeParse(baseBatch({ state })).success).toBe(false);
+    });
+
+    it.each(bad)("rejects state.updatedAt %j", (updatedAt) => {
+      const state = { ...baseState(), updatedAt } as ProjectedState;
+      expect(eventBatchSchema.safeParse(baseBatch({ state })).success).toBe(false);
+    });
+
+    it.each(bad)("rejects node.startedAt %j", (startedAt) => {
+      const batch = withNode(node({ startedAt }));
+      expect(eventBatchSchema.safeParse(batch).success).toBe(false);
+    });
+
+    it.each(bad)("rejects a non-null node.endedAt %j", (endedAt) => {
+      const batch = withNode(node({ status: "succeeded", endedAt }));
+      expect(eventBatchSchema.safeParse(batch).success).toBe(false);
+    });
+  });
+
+  describe("CLASS 2: identity strings", () => {
+    const bad = ["   ", "a\nb"];
+
+    it.each(bad)("rejects eventBatchSchema.runId %j", (runId) => {
+      expect(eventBatchSchema.safeParse(baseBatch({ runId })).success).toBe(false);
+    });
+    it.each(bad)("rejects eventBatchSchema.streamId %j", (streamId) => {
+      expect(eventBatchSchema.safeParse(baseBatch({ streamId })).success).toBe(false);
+    });
+    it.each(bad)("rejects eventBatchSchema.graphName %j", (graphName) => {
+      expect(eventBatchSchema.safeParse(baseBatch({ graphName })).success).toBe(false);
+    });
+    it.each(bad)("rejects state.runId %j", (runId) => {
+      const state = { ...baseState(), runId } as ProjectedState;
+      expect(eventBatchSchema.safeParse(baseBatch({ state })).success).toBe(false);
+    });
+    it.each(bad)("rejects state.graphName %j", (graphName) => {
+      const state = { ...baseState(), graphName } as ProjectedState;
+      expect(eventBatchSchema.safeParse(baseBatch({ state })).success).toBe(false);
+    });
+    it.each(bad)("rejects state.cwd %j", (cwd) => {
+      const state = { ...baseState(), cwd } as ProjectedState;
+      expect(eventBatchSchema.safeParse(baseBatch({ state })).success).toBe(false);
+    });
+  });
+
+  describe("CLASS 3: node identity", () => {
+    const bad = ["", "a b", "x".repeat(70), "END"];
+
+    it.each(bad)("rejects a nodes map key %j", (key) => {
+      const state = baseState();
+      state.nodes = { [key]: node({ nodeId: key }) };
+      expect(eventBatchSchema.safeParse(baseBatch({ state })).success).toBe(false);
+    });
+
+    it.each(bad)("rejects a nodeId field %j", (nodeId) => {
+      expect(eventBatchSchema.safeParse(withNode(node({ nodeId }))).success).toBe(false);
+    });
+  });
+
+  describe("CLASS 4: status and timestamp coherence", () => {
+    it("rejects a succeeded node with a null endedAt", () => {
+      const batch = withNode(node({ status: "succeeded", endedAt: null }));
+      const result = eventBatchSchema.safeParse(batch);
+      expect(result.success).toBe(false);
+      if (result.success) return;
+      expect(result.error.issues.some((i) => i.path.join(".") === "state.nodes.n1.endedAt")).toBe(
+        true,
+      );
+    });
+
+    it("rejects a failed node with a null endedAt", () => {
+      const batch = withNode(node({ status: "failed", endedAt: null, error: "boom" }));
+      expect(eventBatchSchema.safeParse(batch).success).toBe(false);
+    });
+
+    it("rejects a skipped node with a null endedAt", () => {
+      const batch = withNode(node({ status: "skipped", endedAt: null }));
+      expect(eventBatchSchema.safeParse(batch).success).toBe(false);
+    });
+
+    it("accepts a pending or running node with a null endedAt", () => {
+      expect(eventBatchSchema.safeParse(withNode(node({ status: "pending", endedAt: null }))).success).toBe(true);
+      expect(eventBatchSchema.safeParse(withNode(node({ status: "running", endedAt: null }))).success).toBe(true);
+    });
+
+    it("rejects an endedAt earlier than its startedAt", () => {
+      const batch = withNode(
+        node({ startedAt: "2026-08-25T00:00:02.000Z", endedAt: "2026-08-25T00:00:01.000Z" }),
+      );
+      const result = eventBatchSchema.safeParse(batch);
+      expect(result.success).toBe(false);
+      if (result.success) return;
+      expect(result.error.issues.some((i) => i.path.join(".") === "state.nodes.n1.endedAt")).toBe(
+        true,
+      );
+    });
+
+    it("accepts endedAt equal to startedAt", () => {
+      const batch = withNode(
+        node({ startedAt: "2026-08-25T00:00:00.000Z", endedAt: "2026-08-25T00:00:00.000Z" }),
+      );
+      expect(eventBatchSchema.safeParse(batch).success).toBe(true);
+    });
+  });
+
+  describe("CLASS 5: attempts", () => {
+    it("rejects attempts of 0", () => {
+      expect(eventBatchSchema.safeParse(withNode(node({ attempts: 0 }))).success).toBe(false);
+    });
+
+    it("rejects attempts above MAX_ATTEMPTS", () => {
+      expect(eventBatchSchema.safeParse(withNode(node({ attempts: 1001 }))).success).toBe(false);
+    });
+  });
+
+  describe("CLASS 6: cardinality", () => {
+    it("rejects varKeys with more than MAX_VAR_KEYS entries", () => {
+      const state = { ...baseState(), varKeys: Array.from({ length: 257 }, (_, i) => `k${i}`) };
+      expect(eventBatchSchema.safeParse(baseBatch({ state })).success).toBe(false);
+    });
+
+    it("rejects nodes with more than MAX_NODES entries", () => {
+      const state = baseState();
+      for (let i = 0; i < 1001; i++) {
+        const id = `n${i}`;
+        state.nodes[id] = node({ nodeId: id });
+      }
+      expect(eventBatchSchema.safeParse(baseBatch({ state })).success).toBe(false);
+    });
+
+    it("rejects completed with more than MAX_NODES entries", () => {
+      const state = baseState();
+      for (let i = 0; i < 1001; i++) {
+        const id = `n${i}`;
+        state.nodes[id] = node({ nodeId: id });
+      }
+      state.completed = Array.from({ length: 1001 }, (_, i) => `n${i}`);
+      expect(eventBatchSchema.safeParse(baseBatch({ state })).success).toBe(false);
+    });
+  });
+
+  describe("CLASS 7: completed duplicates", () => {
+    it("rejects a completed list with duplicate ids", () => {
+      const state = baseState();
+      state.nodes = {
+        n1: node(),
+        n2: node({ nodeId: "n2" }),
+      };
+      state.completed = ["n1", "n1"];
+      expect(eventBatchSchema.safeParse(baseBatch({ state })).success).toBe(false);
+    });
+  });
+
+  describe("CLASS 8: empty error string", () => {
+    it("rejects a node error that is an empty string", () => {
+      expect(eventBatchSchema.safeParse(withNode(node({ status: "failed", error: "" }))).success).toBe(false);
+    });
+
+    it("rejects a node error that is whitespace only", () => {
+      expect(eventBatchSchema.safeParse(withNode(node({ status: "failed", error: "   " }))).success).toBe(false);
+    });
+
+    it("accepts a null error", () => {
+      expect(eventBatchSchema.safeParse(withNode(node({ error: null }))).success).toBe(true);
+    });
+  });
+
+  describe("must remain accepted", () => {
+    it("accepts an event seq gap, e.g. [0,5]", () => {
+      const events = [0, 5].map((s) => rawLine.replace('"seq":0', `"seq":${s}`));
+      expect(eventBatchSchema.safeParse(baseBatch({ events })).success).toBe(true);
+    });
+
+    it("accepts a line with empty data", () => {
+      const line = rawLine.replace('"data":{"graph":"g"}', '"data":{}');
+      expect(eventBatchSchema.safeParse(baseBatch({ events: [line] })).success).toBe(true);
+    });
+
+    it("accepts an unknown top-level key and returns it byte-identically", () => {
+      const line = rawLine.slice(0, -1) + ',"futureKey":{"x":1}}';
+      const result = eventBatchSchema.safeParse(baseBatch({ events: [line] }));
+      expect(result.success).toBe(true);
+      if (!result.success) return;
+      expect(result.data.events[0]).toBe(line);
+    });
+
+    it("accepts an empty nodes map alongside a run_started line", () => {
+      const state = { ...baseState(), nodes: {} };
+      expect(eventBatchSchema.safeParse(baseBatch({ state })).success).toBe(true);
+    });
+
+    it("accepts a seq of Number.MAX_SAFE_INTEGER on a line", () => {
+      const line = rawLine.replace('"seq":0', `"seq":${Number.MAX_SAFE_INTEGER}`);
+      expect(eventBatchSchema.safeParse(baseBatch({ events: [line] })).success).toBe(true);
+    });
+
+    it("accepts spent greater than budget", () => {
+      const state = {
+        ...baseState(),
+        spent: { usd: 5, wallClockSec: 0, nodeRuns: 20 },
+      };
+      expect(eventBatchSchema.safeParse(baseBatch({ state })).success).toBe(true);
+    });
+
+    it("accepts a budget.maxUsd of 1e-300", () => {
+      const state = { ...baseState(), budget: { maxUsd: 1e-300, maxWallClockSec: 60, maxNodeRuns: 10 } };
+      expect(eventBatchSchema.safeParse(baseBatch({ state })).success).toBe(true);
+    });
+  });
 });
 
 describe("MAX_BODY_BYTES", () => {

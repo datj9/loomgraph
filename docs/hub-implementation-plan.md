@@ -192,6 +192,57 @@ are `null` still has a slot a later change can refill, and nothing would fail. A
 names has nowhere to put a value at all. Prefer the type that makes the mistake
 unrepresentable over the one that merely avoids it today.
 
+**Why each class is constrained.** Each class mirrors a `src/core/` authority, so a wire that
+rejects the value refuses something the engine itself cannot produce.
+
+- **Class 1 (timestamps):** mirrors `new Date().toISOString()`, the only timestamp source in
+  `src/core/engine.ts`; a value that cannot round-trip never reached a checkpoint.
+- **Class 2 (identity strings):** mirrors the run/stream/graph identity the engine writes; a
+  blank or control-character-bearing id would subvert the hub's `(member, stream_id, run_id)`
+  axis and the rewritten `cwd` from `projectState()`.
+- **Class 3 (node identity):** mirrors `src/core/graph.ts:145-147` exactly — the
+  `[A-Za-z0-9_-]{1,64}` pattern and the reserved-`END` refusal; the engine cannot key a node
+  the graph parser rejects.
+- **Class 4 (status/timestamp coherence):** mirrors `commit()` at
+  `src/core/engine.ts:254`, whose only producers (`engine.ts:212`, `:218`) always set a
+  non-null `endedAt` on a terminal node and never one before `startedAt`.
+- **Class 5 (attempts):** mirrors `commit()` recording `result.attempts`, which every
+  producing path keeps >= 1 and <= the graph's retry ceiling.
+- **Class 6 (cardinality):** bounds what one push can carry; the engine emits one row per
+  node and one attempt per retry, so the ceilings sit above any real run.
+- **Class 7 (completed duplicates):** mirrors the engine appending each id once
+  (`engine.ts:145`, `:260`); a duplicated id means a state the engine never writes.
+- **Class 8 (empty error):** mirrors `engine.ts:212` (`error: null`) and `:218` (a real
+  message); an empty-string error describes no reachable state.
+
+**Appendix: what the wire refuses and why.** The record of this audit pass.
+
+| Class | Refused values | Authority in src/core/ |
+| --- | --- | --- |
+| 1 | `ts`, `createdAt`, `updatedAt`, `startedAt`, non-null `endedAt` that is not a round-trippable ISO-8601 instant | `new Date().toISOString()` in `engine.ts` |
+| 2 | `runId`/`streamId`/`graphName`/`cwd` blank after trimming or containing a control character | engine identity fields; `rewritePaths` in `projectState()` |
+| 3 | node map key / `nodeId` not matching `[A-Za-z0-9_-]{1,64}` or equal to `END` | `graph.ts:145-147` |
+| 4 | `succeeded`/`failed`/`skipped` node with null `endedAt`; `endedAt` earlier than `startedAt` | `commit()` at `engine.ts:254` |
+| 5 | `attempts` < 1 or > `MAX_ATTEMPTS` | `result.attempts` in `commit()` |
+| 6 | `varKeys` > `MAX_VAR_KEYS`; `nodes` > `MAX_NODES`; `completed` > `MAX_NODES` | one row per node; one attempt per retry |
+| 7 | duplicate ids in `completed` | `engine.ts:145`, `:260` append once |
+| 8 | `error` that is an empty string | `engine.ts:212` (`null`) and `:218` (real message) |
+
+Ten values that look wrong but are legitimate, and why they must sync:
+
+| Value | Why it is legitimate |
+| --- | --- |
+| `events: []` | a state-only refresh |
+| event seq gap `[0,5]` | a batch is a window into the log, not the whole log |
+| `data: {}` on a line | an event with no payload is normal |
+| unknown top-level key on a line, byte-identical | forward compat, d0e810c |
+| `nodes: {}` beside a `run_started` line | the first push has no node results yet |
+| status `pending`/`running`/`skipped` | all real engine states |
+| `completed: []` | a run that has completed nothing |
+| `seq` of `Number.MAX_SAFE_INTEGER` | absurd but not incoherent; `.int()` already guards 2^53+1 |
+| `spent` exceeding `budget` | a breaching run keeps its results (`budget.ts:35-47`, `:18`) |
+| `budget.maxUsd` of 1e-300 | `graph.ts:69` is only `.positive()` |
+
 **Strictness is asymmetric, deliberately.** `ProjectedState` and `ProjectedNode` are strict:
 an unknown key there is an unclassified field that might carry content, so fail-closed is
 right and is the reason the type exists. The per-line event schema is **not** strict: the hub
@@ -341,6 +392,13 @@ Routes: `GET /v1/health` → `{ok:true, version}`, unauthenticated. `POST /v1/ev
   increasing across the batch, an event line whose own `runId` disagrees with the batch's, a
   `completed` id absent from `nodes`, a duplicate in `varKeys`, and any out-of-range numeric.
   All of them store nothing.
+- Also 400, same shape, storing nothing: a timestamp that is not a round-trippable ISO-8601
+  instant, an identity string that is blank after trimming or carries a control character, a node
+  id that does not match `[A-Za-z0-9_-]{1,64}` or that is the reserved `END`, a `succeeded`,
+  `failed` or `skipped` node with a null `endedAt`, an `endedAt` earlier than its `startedAt`, an
+  `attempts` below 1 or above `MAX_ATTEMPTS`, a `varKeys`/`nodes`/`completed` over its ceiling, a
+  duplicate in `completed`, and an empty-string node `error`. A `spent` beyond `budget` is **not**
+  in this list - it is a real state a breaching run persists.
 - The handler switches on `result.conflict` from `HubStore.ingest`. `true` becomes 409
   `{error:"seq conflict", runId, seq}`; `false` becomes 200 with the high-water mark. Do not
   test for the presence of a field to tell the two apart - narrow on the tag.
