@@ -75,6 +75,21 @@ describe("postEvents", () => {
     if (!result.ok) expect(result.error).toContain("timed out");
   });
 
+  it("4a. a transport that ignores the abort signal is still bounded", async () => {
+    const f: Fetch = () => new Promise(() => {}); // never settles, ignores the signal
+    const started = Date.now();
+    const result = await postEvents(f, cfg, batch(), 25);
+    expect(Date.now() - started).toBeLessThan(5000);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toBe("hub request timed out after 25ms");
+  });
+
+  it("4b. with a timeout of 0, a cooperative transport still resolves normally", async () => {
+    const f = okFetch(200, { highWaterSeq: 7, accepted: 2, duplicates: 0 });
+    const result = await postEvents(f, cfg, batch(), 0);
+    expect(result).toEqual({ ok: true, highWaterSeq: 7 });
+  });
+
   it("5. json() rejecting becomes {ok:false}", async () => {
     const f: Fetch = async () => ({
       status: 200,

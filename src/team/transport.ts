@@ -103,11 +103,13 @@ export async function postEvents(
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    if (timeoutMs > 0) {
-      timer = setTimeout(() => controller.abort(), timeoutMs);
-      timer.unref();
-    }
-    const res = await f(`${cfg.url}/v1/events`, {
+    // The timeout must hold even when the transport ignores the abort signal:
+    // the batcher in commit 1.13 relies on this bound to guarantee that a hub
+    // outage cannot delay a run. Racing the transport against the timer is the
+    // backstop; aborting the controller is still done so a cooperative fetch
+    // releases its socket. A future "simplification" back to signal-only
+    // reintroduces an unbounded wait.
+    const init = {
       method: "POST",
       headers: {
         authorization: `Bearer ${cfg.token}`,
@@ -115,7 +117,23 @@ export async function postEvents(
       },
       body: JSON.stringify(batch),
       signal: controller.signal,
-    });
+    };
+    const timeout =
+      timeoutMs <= 0
+        ? null
+        : new Promise<never>((_resolve, reject) => {
+            timer = setTimeout(() => {
+              controller.abort();
+              const err = new Error("hub request timed out");
+              err.name = "AbortError";
+              reject(err);
+            }, timeoutMs);
+            timer.unref();
+          });
+    const res =
+      timeout === null
+        ? await f(`${cfg.url}/v1/events`, init)
+        : await Promise.race([f(`${cfg.url}/v1/events`, init), timeout]);
     if (res.status < 200 || res.status >= 300) {
       return { ok: false, error: `hub rejected the batch: HTTP ${res.status}` };
     }
