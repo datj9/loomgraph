@@ -152,8 +152,19 @@ export type FeedKind = "run_started" | "run_finished" | "brief_published"
 export interface RunRow { member: string; runId: string; streamId: string;
   graphName: string; status: string; updatedAt: string; receivedAt: string }
 export const MAX_BODY_BYTES = 5 * 1024 * 1024;
-export const eventBatchSchema = /* zod */;
+export const eventBatchSchema = /* zod, strict, plus the cross-field refinement below */;
 ```
+
+**`runId` and `graphName` appear twice — at the top level and inside `state` — and the schema
+must refuse any batch where the two disagree.** Add a zod `.refine` (or `superRefine` so both
+can be reported) rejecting `state.runId !== runId` or `state.graphName !== graphName`. Do not
+resolve the disagreement by precedence: without the check a client can push `runId: "A"`
+carrying a state describing run `B`, and the hub stores a row whose status, cost and node
+table belong to a different run — a wrong answer that never errors, which is the exact failure
+class this plan's preamble exists to catch. Refusal is also the smaller change than dropping
+the two fields from `ProjectedState`, which would leave `HubStore.runState()` in 1.5 returning
+an object that cannot say which run it describes, and would make the 6.4 export depend on
+joining `runs` to reconstruct it.
 
 `varKeys: string[]` rather than `vars` with nulled values is deliberate: a map whose values
 are `null` still has a slot a later change can refill, and nothing would fail. A list of key
@@ -168,7 +179,10 @@ Tests: `eventBatchSchema` rejects a batch whose lines are objects rather than st
 rejects a line that is not valid JSON; accepts a real fixture line unchanged and
 `JSON.parse(line).seq` matches the projected value; rejects a `state` carrying an unknown
 extra key (the schema is strict, so a future `RunState` field cannot ride along unnoticed);
-rejects a `ProjectedNode` that carries an `output` key.
+rejects a `ProjectedNode` that carries an `output` key; **rejects a batch whose
+`state.runId` differs from its top-level `runId`**; **rejects a batch whose
+`state.graphName` differs from its top-level `graphName`**; accepts the batch when both
+agree.
 
 ### 1.5 `feat: add the hub store`
 
@@ -269,6 +283,10 @@ Routes: `GET /v1/health` → `{ok:true, version}`, unauthenticated. `POST /v1/ev
 - 401 `{error:"unauthorized"}`. 404 `{error:"not found"}`. 400 `{error:"bad request"}` for
   an unparseable body or an undecodable cursor. 413 `{error:"body too large"}` when the
   serialized body exceeds `MAX_BODY_BYTES`. 409 `{error:"seq conflict", runId, seq}`.
+- A batch failing `eventBatchSchema`'s cross-field check — `state.runId` or
+  `state.graphName` disagreeing with the top-level value — is 400
+  `{error:"run identity mismatch"}`. The handler must not pick a winner between the two, and
+  must not store any part of the batch.
 - `POST /v1/events` stamps `member` from the token. The zod schema **must not contain a
   `member` field**; there is nothing to prefer over the token, by construction.
 - `GET /v1/feed` `limit` defaults to 50 and clamps to 200.
@@ -281,7 +299,8 @@ high-water mark; replaying returns the same mark with `accepted: 0`; a divergent
 naming runId and seq; an over-cap body is 413 and is never parsed; a batch carrying
 `member: "someone-else"` in the body still stores under the token's member; reading another
 member's run returns their data unmodified; a missing run is 404; a garbage cursor is 400;
-`limit=9999` clamps.
+`limit=9999` clamps; a batch whose `state.runId` disagrees with its top-level `runId` is 400
+and leaves the store empty.
 
 ### 1.8 `feat: add the lg-hub binary`
 

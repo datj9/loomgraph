@@ -144,11 +144,21 @@ So [§11](#11-deletion--decision-d-2-revised)'s claim that events "carry status,
 timing — not content" is true of the event stream and **false of the checkpoint**. The client
 therefore pushes a projection, built on the member's machine before anything leaves it:
 
-- `vars` keys are kept, values replaced with `null`. The key names are the useful part for
-  monitoring; the values are the risk.
+- `vars` becomes `varKeys: string[]` — the key names only. Not a map with the values nulled
+  out: a nulled slot is somewhere a later change can put a value back, and nothing would
+  fail when it did. A list of key names has nowhere to put a value at all. The key names are
+  the useful part for monitoring; the values are the risk, so the shape that can carry them
+  should not exist.
 - `nodes[<id>].output` is dropped entirely. Status, attempts, timing, cost and `error` stay.
 - `cwd` is rewritten through the existing `rewritePaths` before it is sent, so an absolute
   home path does not become a team-readable field.
+
+A batch names its run twice — once at the top level and once inside the projected state —
+so the hub **rejects any batch where the two disagree** rather than picking a winner. Left
+unchecked, a client could push `runId: "A"` carrying a state describing run `B`, and the hub
+would store a row whose status, cost and node table belong to a different run entirely: a
+wrong answer that never errors. Identity on the wire is single-sourced by refusal, not by
+precedence.
 
 This is minimization at the source, the same principle as "the readers drop, they do not
 carry." A hub that never receives the value cannot leak it, cannot be asked to mask it, and
