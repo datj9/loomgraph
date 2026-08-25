@@ -135,6 +135,11 @@ export const SCAN_RULES: ReadonlyArray<{
     pattern: /(?:\/Users\/[^/\s:"'\\]+\/|\/home\/[^/\s:"'\\]+\/|[a-zA-Z]:\\Users\\[^\\\s:"']+\\)/,
     description: "Absolute home path that path rewriting did not remove",
   },
+  {
+    name: "loomgraph-hub-token",
+    pattern: /\blgt_[0-9a-f]{8}\.[A-Za-z0-9_-]{32,}/,
+    description: "LoomGraph hub token (lgt_ prefix)",
+  },
 ];
 
 /** Extensions never read as text by `scanBundleDir`. */
