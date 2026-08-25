@@ -525,8 +525,12 @@ export function projectState(state: RunState, home: string, repoRoot: string): P
 ```
 
 - `vars`: only the key names survive, as `varKeys`. No value is copied anywhere.
-- `nodes[<id>].output`: dropped. `status`, `attempts`, `startedAt`, `endedAt`, `costUsd` and
-  `error` are kept.
+- `nodes[<id>].output`: dropped. `status`, `attempts`, `startedAt`, `endedAt` and `costUsd`
+  are kept; `error` is **masked and truncated** by `safeError` — paths rewritten, every
+  `SCAN_RULES` secret shape reduced to a masked prefix, capped at 200 characters. The adapters
+  build `error` from exactly this section's unpublishable material (`claude.ts:33` embeds raw
+  stdout, `claude.ts:113` and `codex.ts:120` append stderr, `command.ts:40` falls back to the
+  prompt), so restoring the raw value would republish all of it in one field.
 - `cwd`: rewritten through the existing `rewritePaths` from `src/handoff/scan.ts`.
 - Nothing else changes. `ProjectedState` is a distinct hand-written type, never
   `Partial<RunState>` or a mapped type over it, so a future `RunState` field cannot reach the

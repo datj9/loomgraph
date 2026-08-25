@@ -255,4 +255,116 @@ describe("projectState", () => {
     const parsed = eventBatchSchema.safeParse(batch);
     expect(parsed.success).toBe(true);
   });
+
+  it("a shaped secret planted in a node error is absent while the message survives", () => {
+    const secret = shaped("sk-ant-", "api03-0000VERYFAKE0000VERYFAKE0000");
+    const state = baseState();
+    state.nodes.a = node("a", "failed", { error: `could not reach the agent: ${secret}` });
+
+    const projected = projectState(state, OPTS);
+    const serialized = JSON.stringify(projected);
+
+    expect(serialized).not.toContain(secret);
+    expect(serialized).toContain("could not reach the agent");
+  });
+
+  it("a masked secret appears as the first 4 characters of the match followed by ...", () => {
+    const secret = shaped("sk-ant-", "api03-0000VERYFAKE0000VERYFAKE0000");
+    const state = baseState();
+    state.nodes.a = node("a", "failed", { error: `could not reach the agent: ${secret}` });
+
+    const projected = projectState(state, OPTS);
+
+    expect(projected.nodes.a!.error).toContain("sk-a...");
+    expect(projected.nodes.a!.error).not.toContain("api03");
+  });
+
+  it("an absolute home path in a node error is rewritten to the HOME placeholder", () => {
+    const state = baseState();
+    state.nodes.a = node("a", "failed", {
+      error: "missing /home/alice/.config/loomgraph/hub.json",
+    });
+
+    const projected = projectState(state, OPTS);
+
+    expect(projected.nodes.a!.error).toBe("missing ${HOME}/.config/loomgraph/hub.json");
+  });
+
+  it("a repo-root path in a node error is rewritten to the REPO_ROOT placeholder", () => {
+    const state = baseState();
+    state.nodes.a = node("a", "failed", {
+      error: "script at /home/alice/work/repo/scripts/deploy.sh blew up",
+    });
+
+    const projected = projectState(state, OPTS);
+
+    expect(projected.nodes.a!.error).toBe("script at ${REPO_ROOT}/scripts/deploy.sh blew up");
+  });
+
+  it("a node error longer than 200 characters is truncated to 200 plus a single ellipsis", () => {
+    const state = baseState();
+    state.nodes.a = node("a", "failed", {
+      error: `node failed after exhaustive retries: ${"retry-".repeat(50)}`,
+    });
+
+    const projected = projectState(state, OPTS);
+
+    expect(projected.nodes.a!.error!.length).toBeLessThanOrEqual(201);
+    expect(projected.nodes.a!.error!.endsWith("…")).toBe(true);
+    expect(projected.nodes.a!.error!.startsWith("node failed after exhaustive retries")).toBe(true);
+  });
+
+  it("a null node error stays exactly null - never an empty string", () => {
+    const state = baseState();
+    state.nodes.a = node("a", "failed", { error: null });
+
+    const projected = projectState(state, OPTS);
+    const serialized = JSON.stringify(projected);
+
+    expect(projected.nodes.a!.error).toBeNull();
+    expect(serialized).toContain('"error":null');
+    expect(serialized).not.toContain('"error":""');
+  });
+
+  it("a command-shaped error carrying a path and a secret comes out with both sanitised", () => {
+    const secret = shaped("sk-ant-", "api03-0000VERYFAKE0000VERYFAKE0000");
+    const state = baseState();
+    state.nodes.a = node("a", "failed", {
+      error: `command exited with code 1: /home/alice/work/repo/run.sh: error: token ${secret} rejected`,
+    });
+
+    const projected = projectState(state, OPTS);
+
+    expect(projected.nodes.a!.error).toContain("${REPO_ROOT}/run.sh");
+    expect(projected.nodes.a!.error).toContain("token sk-a... rejected");
+    expect(projected.nodes.a!.error).not.toContain(secret);
+    expect(projected.nodes.a!.error).not.toContain("/home/alice");
+  });
+
+  it("a short node error with no secret or path passes through unchanged", () => {
+    const state = baseState();
+    state.nodes.a = node("a", "failed", { error: "boom" });
+
+    const projected = projectState(state, OPTS);
+
+    expect(projected.nodes.a!.error).toBe("boom");
+  });
+
+  it("a projection with a masked error still passes eventBatchSchema", () => {
+    const secret = shaped("sk-ant-", "api03-0000VERYFAKE0000VERYFAKE0000");
+    const state = baseState();
+    state.nodes.a = node("a", "failed", { error: `could not reach the agent: ${secret}` });
+
+    const projected = projectState(state, OPTS);
+    const batch: EventBatch = {
+      runId: projected.runId,
+      streamId: state.streamId,
+      graphName: projected.graphName,
+      state: projected,
+      events: [],
+    };
+
+    const parsed = eventBatchSchema.safeParse(batch);
+    expect(parsed.success).toBe(true);
+  });
 });

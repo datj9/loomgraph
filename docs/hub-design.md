@@ -149,9 +149,17 @@ therefore pushes a projection, built on the member's machine before anything lea
   fail when it did. A list of key names has nowhere to put a value at all. The key names are
   the useful part for monitoring; the values are the risk, so the shape that can carry them
   should not exist.
-- `nodes[<id>].output` is dropped entirely. Status, attempts, timing, cost and `error` stay.
+- `nodes[<id>].output` is dropped entirely. Status, attempts, timing and cost stay; `error`
+  is kept but **masked and truncated** — see the paragraph below.
 - `cwd` is rewritten through the existing `rewritePaths` before it is sent, so an absolute
   home path does not become a team-readable field.
+
+`error` is kept but sanitised, not copied. The adapters build it from exactly the material this
+section refuses to publish: `src/adapters/claude.ts:33` embeds 200 characters of raw stdout,
+`claude.ts:113` and `codex.ts:120` append stderr, and `command.ts:40` falls back to the prompt
+itself. So on projection an error has its paths rewritten, every scanner-known secret shape
+replaced by a masked prefix, and its length capped at 200 characters. Dropping it outright would
+cost real monitoring value; publishing it raw would undo the rest of this section.
 
 A batch names its run twice — once at the top level and once inside the projected state —
 so the hub **rejects any batch where the two disagree** rather than picking a winner. Left

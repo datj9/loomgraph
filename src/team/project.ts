@@ -1,6 +1,53 @@
 import type { RunState } from "../core/types.js";
 import type { ProjectedState, ProjectedNode } from "../hub/wire.js";
-import { rewritePaths } from "../handoff/scan.js";
+import { SCAN_RULES, rewritePaths } from "../handoff/scan.js";
+
+/**
+ * Ceiling on a published node error. 200 is the number `claude.ts:33` already
+ * truncates stdout to, so it matches the largest thing the adapters
+ * deliberately allow through; a multi-kilobyte stderr dump must not ride along.
+ */
+const MAX_ERROR_LENGTH = 200;
+
+const MASK_PREFIX_LENGTH = 4;
+
+/**
+ * Mask every secret shape `SCAN_RULES` recognises, in the same at-most-
+ * four-characters-plus-ellipsis shape as the private `mask()` in
+ * scan.ts:158-164, with matches of 4 characters or fewer left as-is. Only the
+ * PRESENTATION is written here; the RULES are imported, never copied, so this
+ * is not a fork of the scanner - a rule added there starts masking here
+ * without any edit to this file.
+ */
+function maskSecrets(text: string): string {
+  let out = text;
+  for (const rule of SCAN_RULES) {
+    // Patterns ship without the `g` flag (scan.ts:26-27); clone with it so the
+    // replace visits every match, not just the first.
+    const global = new RegExp(rule.pattern.source, `${rule.pattern.flags}g`);
+    out = out.replace(global, (match) => {
+      if (match.length <= MASK_PREFIX_LENGTH) return match;
+      return `${match.slice(0, MASK_PREFIX_LENGTH)}...`;
+    });
+  }
+  return out;
+}
+
+/** Sanitise a node error for publication: paths rewritten, secrets masked, length capped. */
+function safeError(
+  error: string | null,
+  opts: { home: string; username: string; repoRoot: string },
+): string | null {
+  if (error === null) return null;
+
+  let out = rewritePaths(error, opts);
+  out = maskSecrets(out);
+
+  if (out.length > MAX_ERROR_LENGTH) {
+    out = `${out.slice(0, MAX_ERROR_LENGTH)}…`;
+  }
+  return out;
+}
 
 /**
  * Build the wire projection of a run's state. This is where content stops being pushed:
@@ -29,7 +76,7 @@ export function projectState(
       startedAt: node.startedAt,
       endedAt: node.endedAt,
       attempts: node.attempts,
-      error: node.error,
+      error: safeError(node.error, opts),
       costUsd: node.costUsd,
     };
   }
