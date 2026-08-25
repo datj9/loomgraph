@@ -481,6 +481,13 @@ and leaves the store empty.
   `process.on('warning')` filter (or remove the default listener) and then
   `await import("./storage.js")` dynamically. The warning goes to stderr, so `export --jsonl`
   stdout is clean regardless; this is for the operator's benefit.
+- `export` has two modes and exactly one must be given (usage error, exit 1, if neither or
+  both are). `--jsonl` writes the raw stored lines to stdout, one per line, nothing added -
+  no envelope and no member/runId, so it can be piped and grepped; identity is not
+  representable in a flat stream. `--out <dir>` writes `runs/<member>/<runId>/events.jsonl`,
+  each file the run's raw lines in seq order, one per line, newline-terminated; identity
+  lives in the path. Neither mode re-encodes a line - the `json` column is passed through
+  byte-for-byte.
 - `package.json` gains the `lg-hub` bin; `tsup.config.ts` gains the entry.
 
 Tests: `refuseBind` only. Keep the rest thin enough that "untested wiring" stays true.

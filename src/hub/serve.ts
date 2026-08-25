@@ -1,9 +1,10 @@
 import { Command } from "commander";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { VERSION } from "../index.js";
 import { HubStore } from "./storage.js";
+import { exportGroups } from "./export.js";
 import { handle, type HandlerDeps } from "./handlers.js";
 import { createHttpServer, refuseBind } from "./server.js";
 
@@ -157,14 +158,39 @@ export function main(): Promise<Command> {
 
   program
     .command("export")
-    .option("--jsonl", "one JSON object per line on stdout")
+    .option("--jsonl", "write the raw stored lines to stdout, one per line, for grepping")
+    .option("--out <dir>", "write <dir>/runs/<member>/<runId>/events.jsonl, raw lines only")
     .option("--data-dir <d>", "hub data directory")
-    .description("export ingested events; --jsonl writes one object per line")
+    .description(
+      "export ingested events losslessly. Exactly one of --jsonl or --out is required. " +
+        "--jsonl writes raw lines to stdout, one per line, nothing added - identity is not " +
+        "representable in a flat stream, so this mode is for grepping content. --out preserves " +
+        "identity structurally in the path, which is why the envelope is unnecessary.",
+    )
     .action((opts) => {
       try {
+        const jsonl = opts.jsonl === true;
+        const out = opts.out as string | undefined;
+        if (jsonl === (out !== undefined)) {
+          console.error("export requires exactly one of --jsonl or --out");
+          process.exitCode = 1;
+          return;
+        }
         const store = openStore(opts.dataDir as string | undefined);
-        for (const ev of store.allEvents()) {
-          console.log(JSON.stringify({ member: ev.member, runId: ev.runId, json: ev.json }));
+        if (jsonl) {
+          for (const group of exportGroups(store)) {
+            for (const line of group.lines) {
+              console.log(line);
+            }
+          }
+        } else {
+          const outDir = resolve(out as string);
+          for (const group of exportGroups(store)) {
+            const runDir = join(outDir, "runs", group.member, group.runId);
+            mkdirSync(runDir, { recursive: true });
+            const text = group.lines.map((line) => `${line}\n`).join("");
+            writeFileSync(join(runDir, "events.jsonl"), text);
+          }
         }
         store.close();
       } catch (err) {

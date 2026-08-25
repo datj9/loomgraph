@@ -391,6 +391,12 @@ verbatim client line. The grep audience loses nothing; the query audience gains
 `lg metrics`, full-text search, unread state, threading, revocable share grants and
 multi-day range queries, none of which are reachable by walking files.
 
+The export has two modes and neither re-encodes a line. `--out <dir>` writes the layout above,
+`runs/<member>/<runId>/events.jsonl`, so identity lives in the path rather than in an envelope.
+`--jsonl` writes the raw lines to stdout for grepping, where identity is simply not
+representable - a flat stream cannot carry it without corrupting the line, and corrupting the
+line is the one thing this export exists not to do.
+
 **The law for AGENTS.md, inverted from revision 1:** the hub's database is truth; JSONL is
 a rebuildable export. The laptop's `events.jsonl` is untouched and remains append-only.
 
