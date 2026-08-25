@@ -89,6 +89,16 @@ export interface RunRow {
 
 export const MAX_BODY_BYTES = 5 * 1024 * 1024;
 
+/**
+ * The value of `highWaterSeq` when no event has ever been ingested for a
+ * (member, streamId, runId). It is -1 rather than 0 or null because `seq` is
+ * zero-based: `EventLog.append` starts at `read(runId).length`, so seq 0 is a
+ * real ingested event and cannot double as "nothing yet". `highWater()` returns
+ * this instead of null so the type is a plain number and no caller can forget a
+ * null check.
+ */
+export const NO_EVENTS_YET = -1;
+
 const projectedNodeSchema = z
   .object({
     nodeId: z.string(),

@@ -155,6 +155,12 @@ export const MAX_BODY_BYTES = 5 * 1024 * 1024;
 export const eventBatchSchema = /* zod, strict, plus the cross-field refinement below */;
 ```
 
+**`highWaterSeq` uses `-1`, not `0` or `null`, for "nothing yet".** `seq` is zero-based:
+`EventLog.append` starts at `read(runId).length`, so seq 0 is a real ingested event and cannot
+double as an empty marker. `NO_EVENTS_YET = -1` is exported from `src/hub/wire.ts` so the
+sentinel is named in one place rather than scattered as a literal, and `HubStore.highWater`
+returns a plain `number` so no caller can forget a null check.
+
 **`runId` and `graphName` appear twice — at the top level and inside `state` — and the schema
 must refuse any batch where the two disagree.** Add a zod `.refine` (or `superRefine` so both
 can be reported) rejecting `state.runId !== runId` or `state.graphName !== graphName`. Do not
@@ -212,7 +218,7 @@ export class HubStore {
   static open(path: string, deps?: HubStoreDeps): HubStore   // ':memory:' in tests
   close(): void
   ingest(member: string, batch: EventBatch): IngestResult | IngestConflict
-  highWater(member: string, streamId: string, runId: string): number | null
+  highWater(member: string, streamId: string, runId: string): number  // NO_EVENTS_YET if none
   runState(member: string, runId: string): ProjectedState | null   // newest stream wins
   events(member: string, streamId: string, runId: string): string[]  // raw lines
   listRuns(member?: string): RunRow[]
@@ -237,6 +243,10 @@ Rules an executor must not resolve differently:
 - `ingest` is one transaction. For each event at or below the high-water mark, compare the
   stored `json` byte-for-byte: equal counts as a duplicate; **different aborts the whole
   transaction and returns `IngestConflict` — nothing is written and nothing is acked.**
+- **An empty `events: []` is accepted, not refused.** A state-only refresh is legitimate, and
+  refusing it would make `lg sync` fail whenever the cursor is current but the run's status has
+  advanced. An empty batch updates `runs` and returns the existing high-water mark unchanged -
+  `NO_EVENTS_YET` when the run has never had an event ingested. It is never a conflict.
 - **The return type is a discriminated union tagged on `conflict`.** `IngestResult` carries
   `conflict: false` explicitly, so narrowing is exhaustive and a caller cannot silently treat
   a conflict as a success. Never widen this back to a union whose success arm lacks the tag -
@@ -258,7 +268,9 @@ returns a conflict and writes nothing (assert row count unchanged); `chainHead` 
 hand-computed chain over three events; a keyset cursor round-trips and never repeats or
 skips an item across pages, including when two rows share `received_at`; `allEvents` yields
 every ingested line byte-for-byte; `addMember` → `memberByKeyId` round-trips scopes;
-`revokeMember` sets the timestamp and is idempotent.
+`revokeMember` sets the timestamp and is idempotent; an empty batch against a fresh run
+returns `NO_EVENTS_YET`; an empty batch against a run whose seq 0 is already stored returns
+`0`, proving the sentinel is distinguishable from a real seq 0.
 
 ### 1.6 `feat: add hub auth`
 
@@ -315,6 +327,9 @@ Routes: `GET /v1/health` → `{ok:true, version}`, unauthenticated. `POST /v1/ev
 - The handler switches on `result.conflict` from `HubStore.ingest`. `true` becomes 409
   `{error:"seq conflict", runId, seq}`; `false` becomes 200 with the high-water mark. Do not
   test for the presence of a field to tell the two apart - narrow on the tag.
+- An empty `events: []` is a 200 carrying the unchanged high-water mark, which is
+  `NO_EVENTS_YET` for a run that has never had an event ingested. Do not special-case it into
+  a 204 or an error; a state-only refresh is an ordinary push.
 - `POST /v1/events` stamps `member` from the token. The zod schema **must not contain a
   `member` field**; there is nothing to prefer over the token, by construction.
 - `GET /v1/feed` `limit` defaults to 50 and clamps to 200.

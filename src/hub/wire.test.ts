@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   MAX_BODY_BYTES,
+  NO_EVENTS_YET,
   eventBatchSchema,
   type EventBatch,
   type IngestConflict,
@@ -213,6 +214,13 @@ describe("eventBatchSchema", () => {
 describe("MAX_BODY_BYTES", () => {
   it("is 5 MiB", () => {
     expect(MAX_BODY_BYTES).toBe(5 * 1024 * 1024);
+  });
+});
+
+describe("NO_EVENTS_YET", () => {
+  it("is -1 and cannot collide with a real zero-based seq", () => {
+    expect(NO_EVENTS_YET).toBe(-1);
+    expect(NO_EVENTS_YET).toBeLessThan(0);
   });
 });
 
