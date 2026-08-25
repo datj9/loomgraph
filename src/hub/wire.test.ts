@@ -3,6 +3,8 @@ import {
   MAX_BODY_BYTES,
   eventBatchSchema,
   type EventBatch,
+  type IngestConflict,
+  type IngestResult,
   type ProjectedNode,
   type ProjectedState,
 } from "./wire.js";
@@ -142,5 +144,30 @@ describe("eventBatchSchema", () => {
 describe("MAX_BODY_BYTES", () => {
   it("is 5 MiB", () => {
     expect(MAX_BODY_BYTES).toBe(5 * 1024 * 1024);
+  });
+});
+
+describe("ingest result union", () => {
+  function ingestTag(result: IngestResult | IngestConflict): number {
+    if (result.conflict) {
+      return result.seq;
+    }
+    return result.highWaterSeq;
+  }
+
+  it("routes both arms of the conflict-tagged union to distinguishable values", () => {
+    const success: IngestResult = {
+      conflict: false,
+      highWaterSeq: 7,
+      accepted: 2,
+      duplicates: 1,
+    };
+    const conflict: IngestConflict = {
+      conflict: true,
+      runId: "run-1",
+      seq: 3,
+    };
+    expect(ingestTag(success)).toBe(7);
+    expect(ingestTag(conflict)).toBe(3);
   });
 });

@@ -229,6 +229,11 @@ Rules an executor must not resolve differently:
 - `ingest` is one transaction. For each event at or below the high-water mark, compare the
   stored `json` byte-for-byte: equal counts as a duplicate; **different aborts the whole
   transaction and returns `IngestConflict` — nothing is written and nothing is acked.**
+- **The return type is a discriminated union tagged on `conflict`.** `IngestResult` carries
+  `conflict: false` explicitly, so narrowing is exhaustive and a caller cannot silently treat
+  a conflict as a success. Never widen this back to a union whose success arm lacks the tag -
+  the whole point is that forgetting the check becomes a type error rather than an acked batch
+  that was never stored.
 - The hash chain is global. `chain_head` is a one-row table updated inside the ingest
   transaction; `row_hash = sha256(prev_hash || json)`; genesis `prev_hash` is 32 zero bytes.
 - Cursors are opaque base64 of `{receivedAt, rowid}`, keyset over `(received_at, rowid)`.
@@ -297,6 +302,9 @@ Routes: `GET /v1/health` → `{ok:true, version}`, unauthenticated. `POST /v1/ev
   `state.graphName` disagreeing with the top-level value — is 400
   `{error:"run identity mismatch"}`. The handler must not pick a winner between the two, and
   must not store any part of the batch.
+- The handler switches on `result.conflict` from `HubStore.ingest`. `true` becomes 409
+  `{error:"seq conflict", runId, seq}`; `false` becomes 200 with the high-water mark. Do not
+  test for the presence of a field to tell the two apart - narrow on the tag.
 - `POST /v1/events` stamps `member` from the token. The zod schema **must not contain a
   `member` field**; there is nothing to prefer over the token, by construction.
 - `GET /v1/feed` `limit` defaults to 50 and clamps to 200.

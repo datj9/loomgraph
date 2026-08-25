@@ -42,7 +42,15 @@ export interface ProjectedState {
   seq: number;
 }
 
+/**
+ * The two types below form a discriminated union tagged on `conflict`. `IngestResult`
+ * carries `conflict: false` explicitly so a caller cannot narrow by accident or forget to
+ * check. Commit 1.7's handler must switch on `.conflict` to produce a 409; a caller that
+ * treats the union as a bare success object is a bug. Never widen this back to a union whose
+ * success arm lacks the tag - forgetting the check must stay a type error.
+ */
 export interface IngestResult {
+  conflict: false;
   highWaterSeq: number;
   accepted: number;
   duplicates: number;
