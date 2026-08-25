@@ -122,14 +122,38 @@ Zero new dependencies. `Authorization: Bearer <token>` on everything except `/v1
 | Endpoint | Method | Notes |
 | --- | --- | --- |
 | `/v1/health` | GET | unauthenticated; `{ok, version}` |
-| `/v1/events` | POST | `{runId, streamId, graphName, state, events[]}`, ordered by `seq` |
+| `/v1/events` | POST | `{runId, streamId, graphName, state, events[]}` — `state` is a **projection**, see [§4.1](#41-what-a-pushed-state-omits); `events[]` are raw JSONL lines, ordered by `seq` |
 | `/v1/briefs` | POST | the four bundle files inline as strings |
 | `/v1/feed?after=<cursor>&limit=50` | GET | newest-first page + `nextCursor`; keyset, see [§6.2](#62-pagination-is-keyset-not-byte-offsets) |
 | `/v1/runs/:member/:runId` | GET | stored state + events |
 | `/v1/inbox` | POST | send; schema in [§8](#8-the-inbox) |
 | `/v1/inbox?state=queued` | GET | addressee is always the authenticated member |
 | `/v1/inbox/:id/transition` | POST | `{to, runId?}` |
-| `/v1/admin/members` | POST | enroll; admin token only |
+| — | — | **there is no admin HTTP route.** Member management is CLI-only on the hub host ([§5](#5-identity-and-auth)) |
+
+### 4.1 What a pushed state omits
+
+`RunState` is not safe to push as-is, and revision 1 said otherwise by implication. Two of
+its fields carry content, not status:
+
+- `vars: Record<string, unknown>` — whatever was passed to `--var`, which is exactly where a
+  ticket id, an internal URL or a token ends up.
+- `nodes[<id>].output: unknown` — the agent CLI's raw stdout, verbatim.
+
+So [§11](#11-deletion--decision-d-2-revised)'s claim that events "carry status, cost and
+timing — not content" is true of the event stream and **false of the checkpoint**. The client
+therefore pushes a projection, built on the member's machine before anything leaves it:
+
+- `vars` keys are kept, values replaced with `null`. The key names are the useful part for
+  monitoring; the values are the risk.
+- `nodes[<id>].output` is dropped entirely. Status, attempts, timing, cost and `error` stay.
+- `cwd` is rewritten through the existing `rewritePaths` before it is sent, so an absolute
+  home path does not become a team-readable field.
+
+This is minimization at the source, the same principle as "the readers drop, they do not
+carry." A hub that never receives the value cannot leak it, cannot be asked to mask it, and
+cannot retain it by accident. If a run's output genuinely needs sharing, that is what a brief
+is for — scanned, curated, and revocable.
 
 **Idempotency uses natural keys, not an `Idempotency-Key` header.** Events already carry
 `(runId, seq)` from `src/core/events.ts`. The hub keys them `(member, streamId, runId, seq)`
@@ -180,8 +204,9 @@ $ lg enroll https://hub.internal lgt_a1b2c3d4.xxxx
 wrote ~/.config/loomgraph/hub.json (0600)
 ```
 
-The hub stores only `{member, keyId, tokenHash: sha256(secret), createdAt}`, appended to
-`members.jsonl`. `LOOMGRAPH_HUB_URL` / `LOOMGRAPH_HUB_TOKEN` override the file, the same
+The hub stores only `{member, keyId, tokenHash: sha256(secret), scopes, createdAt}` in the
+`members` table ([§6.3](#63-schema)). Revision 1 said `members.jsonl`; the table supersedes
+it, and there is no members file. `LOOMGRAPH_HUB_URL` / `LOOMGRAPH_HUB_TOKEN` override the file, the same
 pattern as `ENCLAVE_TOKEN`.
 
 **Attribution is server-side, always.** Every stored record gets `member` stamped from the
@@ -189,8 +214,8 @@ token's keyId. `HandoffMeta.createdBy` — currently `userInfo().username` in
 `src/handoff/commands.ts` — is displayed as *"claims created-by"* at most. Never trust a
 client-supplied owner field; that is forgery vector A5.
 
-**Revocation** appends `{revoked: keyId, ts}` to `members.jsonl`, replayed at startup and
-on SIGHUP. A ten-person member file is trivially small.
+**Revocation** sets `members.revoked_at`, and a revoked token resolves to no member on the
+next request — no restart, no SIGHUP, no replay.
 
 **Add a scan rule for the hub token shape before the first token is minted.** This is
 non-optional and easy to forget. Members will paste tokens into shells and configs; agents
@@ -266,16 +291,21 @@ purges, schema evolution and reordering.
 ```sql
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
+PRAGMA user_version=1;      -- bumped by any later column addition; phases 2-4 add tables
 
 -- the verbatim client line is kept in `json`, so the export in §6.4 is lossless
 CREATE TABLE events (
   member TEXT NOT NULL, stream_id TEXT NOT NULL, run_id TEXT NOT NULL, seq INTEGER NOT NULL,
   received_at TEXT NOT NULL, kind TEXT NOT NULL, node_id TEXT,
-  json TEXT NOT NULL CHECK (json_valid(json)),
+  json TEXT NOT NULL CHECK (json_valid(json)),   -- the client's line, byte-for-byte
   prev_hash BLOB, row_hash BLOB NOT NULL,
-  PRIMARY KEY (member, stream_id, run_id, seq)
-) WITHOUT ROWID;
-CREATE INDEX events_feed ON events(received_at);
+  UNIQUE (member, stream_id, run_id, seq)
+);                          -- an ordinary rowid table: §6.2's cursor needs rowid to exist
+CREATE INDEX events_feed ON events(received_at, rowid);
+
+-- the hash chain is global and single-writer; the head is updated inside the ingest
+-- transaction so it can never disagree with the rows
+CREATE TABLE chain_head (id INTEGER PRIMARY KEY CHECK (id = 1), head BLOB NOT NULL);
 
 CREATE TABLE runs (
   member TEXT NOT NULL, run_id TEXT NOT NULL, stream_id TEXT NOT NULL,
@@ -320,9 +350,20 @@ is an index, receipts are columns, the members-file replay is a table, the §11 
 `revoked_at`. One ingest batch is one transaction — it happened or it did not — replacing
 revision 1's four-file interleaving that had to be reasoned about by hand.
 
-`row_hash = sha256(prev_hash || json)`, with the chain head published to members
-periodically. This is the tamper-evidence revision 1 claimed from file semantics and did
-not actually have.
+`row_hash = sha256(prev_hash || json)` where `prev_hash` is the value in `chain_head`,
+genesis being 32 zero bytes; the head advances in the same transaction as the insert. The
+head is published to members periodically. This is the tamper-evidence revision 1 claimed
+from file semantics and did not actually have.
+
+**`events` is written with `INSERT … ON CONFLICT DO NOTHING`, never `INSERT OR REPLACE`.**
+`OR REPLACE` is a delete followed by an insert, so it fires the append-only delete trigger
+and aborts the transaction. The shortest path to a green test at that point is deleting the
+trigger, which is why this is written down here rather than left to be discovered.
+
+`WITHOUT ROWID` was in revision 1 and is removed: SQLite gives such tables no `rowid`
+column, which the keyset cursor in [§6.2](#62-pagination-is-keyset-not-byte-offsets)
+requires. Verified against this machine's `node:sqlite` — `SELECT rowid` on a
+`WITHOUT ROWID` table fails with `no such column: rowid`.
 
 ### 6.4 The greppable artifact survives as an export
 
@@ -344,6 +385,11 @@ a rebuildable export. The laptop's `events.jsonl` is untouched and remains appen
   and are unaffected by hub state.
 - **Migrations** are cheap because the event payload is an opaque verbatim `json` column;
   new client fields need no `ALTER TABLE`. Only hub-side projections migrate.
+- **`engines.node` must be `>=22.13`.** `node:sqlite` is behind `--experimental-sqlite`
+  before 22.13.0, so the current `>=22` would let `lg-hub` crash at import on 22.0–22.12.
+  It also emits an `ExperimentalWarning` on import at every version tested; the `lg-hub`
+  bin filters that one warning before importing the store, which requires the import to be
+  dynamic. Stdout is unaffected either way — the warning goes to stderr.
 - **Postgres is not warranted.** One process, ten members at most, embedded synchronous
   access, zero-dependency ethos. Revisit at multiple hub nodes or roughly fifty members;
   arguing for it now would only discredit the SQLite case.
