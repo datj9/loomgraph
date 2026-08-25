@@ -24,7 +24,7 @@
   "author": "Dat Nguyen",
   "license": "MIT",
   "engines": {
-    "node": ">=22"
+    "node": ">=22.13"
   },
   "scripts": {
     "build": "tsup",
