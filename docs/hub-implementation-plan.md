@@ -119,8 +119,30 @@ so it lands before either.
 /** One push. `events` are RAW LINES from events.jsonl, never re-serialized objects. */
 export interface EventBatch {
   runId: string; streamId: string; graphName: string;
-  state: ProjectedState;          // see 1.10
+  state: ProjectedState;
   events: string[];               // each element is one verbatim line, ordered by seq
+}
+
+/** A node result with its content removed. No `output` field exists, by construction. */
+export interface ProjectedNode {
+  nodeId: string; status: NodeStatus; startedAt: string; endedAt: string | null;
+  attempts: number; error: string | null; costUsd: number;
+}
+
+/**
+ * `RunState` with every content-carrying field structurally absent. Declared HERE, not in
+ * `src/team/project.ts`, because it is wire vocabulary; commit 1.10 supplies the function
+ * that produces it. Note there is no `streamId` - `EventBatch` carries that at top level,
+ * which is also why this type is buildable before commit 1.9 exists.
+ */
+export interface ProjectedState {
+  runId: string; graphName: string; status: RunStatus;
+  createdAt: string; updatedAt: string;
+  cwd: string;                    // rewritten by projectState() before it gets here
+  varKeys: string[];              // KEY NAMES ONLY - there is nowhere to put a value
+  budget: Budget; spent: BudgetSpent;
+  nodes: Record<string, ProjectedNode>;
+  completed: string[]; seq: number;
 }
 export interface IngestResult { highWaterSeq: number; accepted: number; duplicates: number }
 export interface IngestConflict { conflict: true; runId: string; seq: number }
@@ -133,13 +155,20 @@ export const MAX_BODY_BYTES = 5 * 1024 * 1024;
 export const eventBatchSchema = /* zod */;
 ```
 
+`varKeys: string[]` rather than `vars` with nulled values is deliberate: a map whose values
+are `null` still has a slot a later change can refill, and nothing would fail. A list of key
+names has nowhere to put a value at all. Prefer the type that makes the mistake
+unrepresentable over the one that merely avoids it today.
+
 **The verbatim-line rule is load-bearing.** The server zod-parses each line to validate it
 and to project `(seq, kind, node_id)` into columns, then stores **the original string**.
 Re-stringifying breaks §6.4's lossless export with no failing test.
 
 Tests: `eventBatchSchema` rejects a batch whose lines are objects rather than strings;
 rejects a line that is not valid JSON; accepts a real fixture line unchanged and
-`JSON.parse(line).seq` matches the projected value.
+`JSON.parse(line).seq` matches the projected value; rejects a `state` carrying an unknown
+extra key (the schema is strict, so a future `RunState` field cannot ride along unnoticed);
+rejects a `ProjectedNode` that carries an `output` key.
 
 ### 1.5 `feat: add the hub store`
 
@@ -297,16 +326,17 @@ written without the field mints one, persists it, and a second load returns the 
 **The security commit of this phase.** New `src/team/project.ts`:
 
 ```ts
-export interface ProjectedState { /* RunState minus content */ }
+import type { ProjectedState } from "../hub/wire.js";   // declared in commit 1.4
 export function projectState(state: RunState, home: string, repoRoot: string): ProjectedState
 ```
 
-- `vars`: keys kept, every value replaced with `null`.
+- `vars`: only the key names survive, as `varKeys`. No value is copied anywhere.
 - `nodes[<id>].output`: dropped. `status`, `attempts`, `startedAt`, `endedAt`, `costUsd` and
   `error` are kept.
 - `cwd`: rewritten through the existing `rewritePaths` from `src/handoff/scan.ts`.
-- Nothing else changes. `ProjectedState` is a distinct type, not `Partial<RunState>`, so a
-  future field must be explicitly classified before it can be pushed.
+- Nothing else changes. `ProjectedState` is a distinct hand-written type, never
+  `Partial<RunState>` or a mapped type over it, so a future `RunState` field cannot reach the
+  wire until someone classifies it by hand.
 
 Tests: a `vars` value containing a `shaped()` secret is absent from the output while its key
 is present; a node output containing a secret is absent; `costUsd`/`status`/`attempts`
