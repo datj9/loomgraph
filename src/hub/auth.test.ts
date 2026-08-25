@@ -36,6 +36,15 @@ describe("parseToken", () => {
     expect(parseToken("BEARER" + VALID_TOKEN.slice("Bearer".length))).not.toBeNull();
   });
 
+  it("requires a lowercase keyId: an uppercase keyId does not parse, its lowercase twin does", () => {
+    const secret = "FAKEfake0000FAKEfake0000FAKEfake";
+    expect(parseToken(`Bearer lgt_ABCDEF12.${secret}`)).toBeNull();
+    expect(parseToken(`Bearer lgt_abcdef12.${secret}`)).toEqual({
+      keyId: "abcdef12",
+      secret,
+    });
+  });
+
   it("returns null without throwing for every malformed shape", () => {
     const bad = [
       undefined,

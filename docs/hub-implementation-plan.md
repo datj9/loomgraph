@@ -375,6 +375,14 @@ export function resolveMember(store: HubStore, header: string | undefined):
   null rather than throwing**, because `timingSafeEqual` throws on length mismatch and that
   would turn a bad credential into a 500.
 - A revoked member resolves to null.
+- **Scope enforcement is pinned here so commit 1.7 does not decide it by accident.**
+  `POST /v1/events` requires the `ingest` scope. `GET /v1/feed` and
+  `GET /v1/runs/:member/:runId` require `read`. `GET /v1/health` requires nothing and stays
+  unauthenticated.
+- **A token that resolves but lacks the scope is 403 `{error:"forbidden"}`, not 401.** 401 means
+  \"I do not know who you are\"; 403 means \"I do, and you may not\". Keeping them distinct means
+  phase 3's §3.5 only adds the `admin` scope and the `read_marks` work, rather than retrofitting
+  enforcement onto routes that never had it.
 
 Tests: valid resolves; unknown keyId null; correct keyId with wrong secret null; **valid
 keyId with a 3-character secret resolves null and does not throw**; revoked null; `undefined`,
@@ -394,15 +402,24 @@ export interface HandlerDeps { store: HubStore; now(): string; version: string }
 export function handle(req: WireRequest, deps: HandlerDeps): WireResponse
 ```
 
-Routes: `GET /v1/health` → `{ok:true, version}`, unauthenticated. `POST /v1/events`,
-`GET /v1/feed`, `GET /v1/runs/:member/:runId` — all authenticated. Anything else 404.
+| Route | Auth | Scope | Notes |
+| --- | --- | --- | --- |
+| `GET /v1/health` | none | — | `{ok:true, version}` |
+| `POST /v1/events` | required | `ingest` | ingest a batch |
+| `GET /v1/feed` | required | `read` | newest-first page |
+| `GET /v1/runs/:member/:runId` | required | `read` | any member's stored run |
 
-- Order of operations: body-size check → auth → JSON/zod parse → act. Auth failure must not
-  reveal whether the body was valid.
+Anything else is 404. A token that resolves but lacks the route's scope is 403
+`{error:"forbidden"}`.
+
+- Order of operations: body-size check → auth → **scope** → JSON/zod parse → act. Auth failure
+  must not reveal whether the body was valid, a 413 must not require parsing the body, and a
+  403 must not reveal whether the body was valid either.
 - Every error body is exactly `{ error: string }`, plus fields where named below.
 - 401 `{error:"unauthorized"}`. 404 `{error:"not found"}`. 400 `{error:"bad request"}` for
   an unparseable body or an undecodable cursor. 413 `{error:"body too large"}` when the
   serialized body exceeds `MAX_BODY_BYTES`. 409 `{error:"seq conflict", runId, seq}`.
+- 403 `{error:"forbidden"}` when the token resolves but lacks the route's scope.
 - A batch failing `eventBatchSchema`'s cross-field check — `state.runId` or
   `state.graphName` disagreeing with the top-level value — is 400
   `{error:"run identity mismatch"}`. The handler must not pick a winner between the two, and

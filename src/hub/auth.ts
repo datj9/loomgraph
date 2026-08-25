@@ -14,12 +14,17 @@ export interface MemberLookup {
 }
 
 /**
- * Accepts `Bearer lgt_<8 hex>.<base64url secret>`. The scheme match is
+ * Accepts `Bearer lgt_<8 lowercase hex>.<base64url secret>`. The scheme match is
  * case-insensitive per RFC 7235. Returns null, never throws, for any other shape.
+ *
+ * The keyId alphabet is lowercase hex, and THREE components must agree on it: `mintKeyId` in
+ * storage.ts, this parser, and the `loomgraph-hub-token` rule in src/handoff/scan.ts. Widening
+ * any one of them alone is a bug: a scanner laxer than the minter fires on strings nothing
+ * produces, and a minter laxer than the scanner silently stops being redacted.
  */
 export function parseToken(header: string | undefined): { keyId: string; secret: string } | null {
   if (header === undefined) return null;
-  const m = /^Bearer\s+lgt_([0-9a-fA-F]{8})\.([A-Za-z0-9_-]+)$/i.exec(header);
+  const m = /^[Bb][Ee][Aa][Rr][Ee][Rr]\s+lgt_([0-9a-f]{8})\.([A-Za-z0-9_-]+)$/.exec(header);
   if (m === null) return null;
   return { keyId: m[1]!, secret: m[2]! };
 }
