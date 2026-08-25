@@ -172,12 +172,26 @@ export const eventBatchSchema = z
     state: projectedStateSchema,
     events: z.array(
       // each element must parse to a valid LgEvent but stays a string on the wire
-      z.string().refine((line) => {
+      z.string().superRefine((line, ctx) => {
+        let parsed: unknown;
         try {
-          const parsed = JSON.parse(line) as unknown;
-          return eventSchema.safeParse(parsed).success;
+          parsed = JSON.parse(line);
         } catch {
-          return false;
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: "line is not valid JSON",
+          });
+          return;
+        }
+        const result = eventSchema.safeParse(parsed);
+        if (!result.success) {
+          const detail = result.error.issues
+            .map((issue) => `${issue.path.join(".") || "(root)"}: ${issue.message}`)
+            .join("; ");
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `line is valid JSON but not a valid event: ${detail}`,
+          });
         }
       }),
     ),
@@ -197,5 +211,14 @@ export const eventBatchSchema = z
         path: ["state", "graphName"],
         message: `state.graphName (${batch.state.graphName}) does not match top-level graphName (${batch.graphName})`,
       });
+    }
+    for (const [key, value] of Object.entries(batch.state.nodes)) {
+      if (key !== value.nodeId) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["state", "nodes", key, "nodeId"],
+          message: `state.nodes.${key}.nodeId (${value.nodeId}) does not match its map key (${key})`,
+        });
+      }
     }
   });

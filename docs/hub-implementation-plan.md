@@ -166,6 +166,12 @@ the two fields from `ProjectedState`, which would leave `HubStore.runState()` in
 an object that cannot say which run it describes, and would make the 6.4 export depend on
 joining `runs` to reconstruct it.
 
+**Identity stated twice is refused a third time.** `ProjectedState.nodes` is keyed by node id
+*and* each `ProjectedNode` carries `nodeId`, so the schema refuses any entry where the map key
+and the field disagree, at path `state.nodes.<key>.nodeId`. `nodeId` stays on the node so the
+type is self-describing when passed alone; the disagreement is what gets refused. Every
+mismatched entry is reported, not just the first.
+
 `varKeys: string[]` rather than `vars` with nulled values is deliberate: a map whose values
 are `null` still has a slot a later change can refill, and nothing would fail. A list of key
 names has nowhere to put a value at all. Prefer the type that makes the mistake
@@ -192,7 +198,9 @@ extra key (the schema is strict, so a future `RunState` field cannot ride along 
 rejects a `ProjectedNode` that carries an `output` key; **rejects a batch whose
 `state.runId` differs from its top-level `runId`**; **rejects a batch whose
 `state.graphName` differs from its top-level `graphName`**; accepts the batch when both
-agree.
+agree; rejects a `nodes` entry whose map key differs from its `nodeId`, at the right path;
+a line that is not valid JSON reports a message saying so, not a bare `Invalid input`;
+a line that is valid JSON but an invalid event reports the inner zod message.
 
 ### 1.5 `feat: add the hub store`
 
@@ -302,6 +310,8 @@ Routes: `GET /v1/health` → `{ok:true, version}`, unauthenticated. `POST /v1/ev
   `state.graphName` disagreeing with the top-level value — is 400
   `{error:"run identity mismatch"}`. The handler must not pick a winner between the two, and
   must not store any part of the batch.
+- A `nodes` entry whose map key disagrees with its `nodeId` is the same 400
+  `{error:"run identity mismatch"}` as a `runId` or `graphName` mismatch, and stores nothing.
 - The handler switches on `result.conflict` from `HubStore.ingest`. `true` becomes 409
   `{error:"seq conflict", runId, seq}`; `false` becomes 200 with the high-water mark. Do not
   test for the presence of a field to tell the two apart - narrow on the tag.

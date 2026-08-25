@@ -136,6 +136,75 @@ describe("eventBatchSchema", () => {
     expect(paths).toContain("state.graphName");
   });
 
+  it("rejects a batch whose nodes map key differs from the node's nodeId", () => {
+    const state = baseState();
+    state.nodes = {
+      alpha: {
+        nodeId: "BETA",
+        status: "running",
+        startedAt: "2026-08-25T00:00:00.000Z",
+        endedAt: null,
+        attempts: 1,
+        error: null,
+        costUsd: 0.1,
+      },
+    };
+    const result = eventBatchSchema.safeParse(baseBatch({ state }));
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error.issues.some((i) => i.path.join(".") === "state.nodes.alpha.nodeId")).toBe(
+      true,
+    );
+  });
+
+  it("reports every mismatched nodes entry, not just the first", () => {
+    const state = baseState();
+    state.nodes = {
+      alpha: {
+        nodeId: "BETA",
+        status: "running",
+        startedAt: "2026-08-25T00:00:00.000Z",
+        endedAt: null,
+        attempts: 1,
+        error: null,
+        costUsd: 0.1,
+      },
+      gamma: {
+        nodeId: "delta",
+        status: "succeeded",
+        startedAt: "2026-08-25T00:00:00.000Z",
+        endedAt: "2026-08-25T00:00:01.000Z",
+        attempts: 1,
+        error: null,
+        costUsd: 0.1,
+      },
+    };
+    const result = eventBatchSchema.safeParse(baseBatch({ state }));
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    const paths = result.error.issues.map((i) => i.path.join("."));
+    expect(paths).toContain("state.nodes.alpha.nodeId");
+    expect(paths).toContain("state.nodes.gamma.nodeId");
+  });
+
+  it("tells a not-JSON line apart from a JSON-but-invalid-event line", () => {
+    const notJson = eventBatchSchema.safeParse(baseBatch({ events: ["this is {not json"] }));
+    expect(notJson.success).toBe(false);
+    if (notJson.success) return;
+    const notJsonMessages = notJson.error.issues.map((i) => i.message);
+    expect(notJsonMessages.some((m) => m !== "Invalid input")).toBe(true);
+    expect(notJsonMessages.some((m) => m.includes("JSON"))).toBe(true);
+
+    const badEvent = eventBatchSchema.safeParse(
+      baseBatch({ events: [rawLine.replace(',"seq":0', "")] }),
+    );
+    expect(badEvent.success).toBe(false);
+    if (badEvent.success) return;
+    const badEventMessages = badEvent.error.issues.map((i) => i.message);
+    expect(badEventMessages.some((m) => m !== "Invalid input")).toBe(true);
+    expect(badEventMessages.some((m) => m.includes("seq"))).toBe(true);
+  });
+
   it("accepts a fully valid batch", () => {
     expect(eventBatchSchema.safeParse(baseBatch()).success).toBe(true);
   });
