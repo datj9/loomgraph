@@ -105,38 +105,42 @@ const projectedNodeSchema = z
     status: z.enum(["pending", "running", "succeeded", "failed", "skipped"]),
     startedAt: z.string(),
     endedAt: z.string().nullable(),
-    attempts: z.number(),
+    attempts: z.number().int().nonnegative(),
     error: z.string().nullable(),
-    costUsd: z.number(),
+    costUsd: z.number().nonnegative(),
   })
   .strict();
 
 const projectedStateSchema = z
   .object({
-    runId: z.string(),
-    graphName: z.string(),
+    runId: z.string().min(1),
+    graphName: z.string().min(1),
     status: z.enum(["pending", "running", "paused", "succeeded", "failed"]),
     createdAt: z.string(),
     updatedAt: z.string(),
     cwd: z.string(),
-    varKeys: z.array(z.string()),
+    varKeys: z
+      .array(z.string())
+      .refine((keys) => new Set(keys).size === keys.length, {
+        message: "varKeys must not contain duplicate entries",
+      }),
     budget: z
       .object({
-        maxUsd: z.number(),
-        maxWallClockSec: z.number(),
-        maxNodeRuns: z.number(),
+        maxUsd: z.number().positive(),
+        maxWallClockSec: z.number().positive(),
+        maxNodeRuns: z.number().int().positive(),
       })
       .strict(),
     spent: z
       .object({
-        usd: z.number(),
-        wallClockSec: z.number(),
-        nodeRuns: z.number(),
+        usd: z.number().nonnegative(),
+        wallClockSec: z.number().nonnegative(),
+        nodeRuns: z.number().int().nonnegative(),
       })
       .strict(),
     nodes: z.record(z.string(), projectedNodeSchema),
     completed: z.array(z.string()),
-    seq: z.number(),
+    seq: z.number().int().nonnegative(),
   })
   .strict();
 
@@ -152,7 +156,7 @@ const eventSchema = z
   .object({
     ts: z.string(),
     runId: z.string(),
-    seq: z.number(),
+    seq: z.number().int().nonnegative(),
     kind: z.enum([
       "run_started",
       "node_started",
@@ -176,9 +180,9 @@ const eventSchema = z
  */
 export const eventBatchSchema = z
   .object({
-    runId: z.string(),
-    streamId: z.string(),
-    graphName: z.string(),
+    runId: z.string().min(1),
+    streamId: z.string().min(1),
+    graphName: z.string().min(1),
     state: projectedStateSchema,
     events: z.array(
       // each element must parse to a valid LgEvent but stays a string on the wire
@@ -230,5 +234,56 @@ export const eventBatchSchema = z
           message: `state.nodes.${key}.nodeId (${value.nodeId}) does not match its map key (${key})`,
         });
       }
+    }
+
+    const parsedSeqs = batch.events.map((line) => {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        return null;
+      }
+      const seq = (parsed as { seq?: unknown }).seq;
+      return typeof seq === "number" ? seq : null;
+    });
+    for (let i = 1; i < parsedSeqs.length; i++) {
+      const prev = parsedSeqs[i - 1]!;
+      const cur = parsedSeqs[i]!;
+      if (prev === null || cur === null) continue;
+      if (cur <= prev) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["events", i],
+          message: `event line ${i} has seq ${cur}, which is not greater than the previous line's seq ${prev}`,
+        });
+        break;
+      }
+    }
+
+    for (let i = 0; i < batch.events.length; i++) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(batch.events[i]!);
+      } catch {
+        continue;
+      }
+      const runId = (parsed as { runId?: unknown }).runId;
+      if (typeof runId === "string" && runId !== batch.runId) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["events", i],
+          message: `event line ${i} carries runId (${runId}), which does not match the top-level runId (${batch.runId})`,
+        });
+      }
+    }
+
+    const nodeKeys = new Set(Object.keys(batch.state.nodes));
+    const unknownCompleted = batch.state.completed.filter((id) => !nodeKeys.has(id));
+    if (unknownCompleted.length > 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["state", "completed"],
+        message: `completed references ids not present in nodes: ${unknownCompleted.join(", ")}`,
+      });
     }
   });

@@ -209,6 +209,145 @@ describe("eventBatchSchema", () => {
   it("accepts a fully valid batch", () => {
     expect(eventBatchSchema.safeParse(baseBatch()).success).toBe(true);
   });
+
+  it("rejects an event line whose seq is negative", () => {
+    const line = rawLine.replace('"seq":0', '"seq":-1');
+    expect(eventBatchSchema.safeParse(baseBatch({ events: [line] })).success).toBe(false);
+  });
+
+  it("rejects an event line whose seq is not an integer", () => {
+    const line = rawLine.replace('"seq":0', '"seq":1.5');
+    expect(eventBatchSchema.safeParse(baseBatch({ events: [line] })).success).toBe(false);
+  });
+
+  it("rejects a state whose seq is negative", () => {
+    const state = { ...baseState(), seq: -1 };
+    expect(eventBatchSchema.safeParse(baseBatch({ state })).success).toBe(false);
+  });
+
+  it("rejects a state whose seq is not an integer", () => {
+    const state = { ...baseState(), seq: 1.5 };
+    expect(eventBatchSchema.safeParse(baseBatch({ state })).success).toBe(false);
+  });
+
+  it("rejects an empty identity string on the batch or the state", () => {
+    expect(eventBatchSchema.safeParse(baseBatch({ runId: "" })).success).toBe(false);
+    expect(eventBatchSchema.safeParse(baseBatch({ streamId: "" })).success).toBe(false);
+    expect(eventBatchSchema.safeParse(baseBatch({ graphName: "" })).success).toBe(false);
+    expect(
+      eventBatchSchema.safeParse(baseBatch({ state: { ...baseState(), runId: "" } })).success,
+    ).toBe(false);
+    expect(
+      eventBatchSchema.safeParse(baseBatch({ state: { ...baseState(), graphName: "" } })).success,
+    ).toBe(false);
+  });
+
+  it("rejects a node with negative costUsd", () => {
+    const state = baseState();
+    state.nodes = {
+      n1: {
+        nodeId: "n1",
+        status: "succeeded",
+        startedAt: "2026-08-25T00:00:00.000Z",
+        endedAt: "2026-08-25T00:00:01.000Z",
+        attempts: 1,
+        error: null,
+        costUsd: -0.1,
+      },
+    };
+    expect(eventBatchSchema.safeParse(baseBatch({ state })).success).toBe(false);
+  });
+
+  it("rejects a node whose attempts is negative or not an integer", () => {
+    const withAttempts = (attempts: number) => {
+      const state = baseState();
+      state.nodes = {
+        n1: {
+          nodeId: "n1",
+          status: "running",
+          startedAt: "2026-08-25T00:00:00.000Z",
+          endedAt: null,
+          attempts,
+          error: null,
+          costUsd: 0.1,
+        },
+      };
+      return baseBatch({ state });
+    };
+    expect(eventBatchSchema.safeParse(withAttempts(-1)).success).toBe(false);
+    expect(eventBatchSchema.safeParse(withAttempts(1.5)).success).toBe(false);
+  });
+
+  it("rejects negative or non-integer spent values", () => {
+    const withSpent = (spent: { usd: number; wallClockSec: number; nodeRuns: number }) =>
+      baseBatch({ state: { ...baseState(), spent } });
+    expect(eventBatchSchema.safeParse(withSpent({ usd: -0.1, wallClockSec: 0, nodeRuns: 0 })).success).toBe(false);
+    expect(eventBatchSchema.safeParse(withSpent({ usd: 0, wallClockSec: -1, nodeRuns: 0 })).success).toBe(false);
+    expect(eventBatchSchema.safeParse(withSpent({ usd: 0, wallClockSec: 0, nodeRuns: -1 })).success).toBe(false);
+    expect(eventBatchSchema.safeParse(withSpent({ usd: 0, wallClockSec: 0, nodeRuns: 1.5 })).success).toBe(false);
+  });
+
+  it("rejects a budget the engine's own graph parser would reject", () => {
+    const withBudget = (budget: { maxUsd: number; maxWallClockSec: number; maxNodeRuns: number }) =>
+      baseBatch({ state: { ...baseState(), budget } });
+    expect(eventBatchSchema.safeParse(withBudget({ maxUsd: 0, maxWallClockSec: 60, maxNodeRuns: 10 })).success).toBe(false);
+    expect(eventBatchSchema.safeParse(withBudget({ maxUsd: 1, maxWallClockSec: 0, maxNodeRuns: 10 })).success).toBe(false);
+    expect(eventBatchSchema.safeParse(withBudget({ maxUsd: 1, maxWallClockSec: 60, maxNodeRuns: 0 })).success).toBe(false);
+    expect(eventBatchSchema.safeParse(withBudget({ maxUsd: 1, maxWallClockSec: 60, maxNodeRuns: 1.5 })).success).toBe(false);
+  });
+
+  it("rejects a varKeys array with duplicate entries", () => {
+    const state = { ...baseState(), varKeys: ["a", "b", "a"] };
+    expect(eventBatchSchema.safeParse(baseBatch({ state })).success).toBe(false);
+  });
+
+  it("rejects a batch whose event seqs are not strictly increasing", () => {
+    const events = [2, 0, 1].map((s) => rawLine.replace('"seq":0', `"seq":${s}`));
+    const result = eventBatchSchema.safeParse(baseBatch({ events }));
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error.issues.some((i) => i.path.join(".") === "events.1")).toBe(true);
+  });
+
+  it("rejects intra-batch duplicate seqs", () => {
+    const events = [rawLine, rawLine.replace('"seq":0', '"seq":0')];
+    const result = eventBatchSchema.safeParse(baseBatch({ events }));
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error.issues.some((i) => i.path.join(".") === "events.1")).toBe(true);
+  });
+
+  it("rejects an event line whose runId differs from the batch runId", () => {
+    const line = rawLine.replace('"runId":"run-1"', '"runId":"run-other"');
+    const result = eventBatchSchema.safeParse(baseBatch({ events: [line] }));
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error.issues.some((i) => i.path.join(".") === "events.0")).toBe(true);
+  });
+
+  it("rejects a completed id that is absent from nodes", () => {
+    const state = baseState();
+    state.nodes = {
+      n1: {
+        nodeId: "n1",
+        status: "succeeded",
+        startedAt: "2026-08-25T00:00:00.000Z",
+        endedAt: "2026-08-25T00:00:01.000Z",
+        attempts: 1,
+        error: null,
+        costUsd: 0.1,
+      },
+    };
+    state.completed = ["n1", "ghost"];
+    const result = eventBatchSchema.safeParse(baseBatch({ state }));
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error.issues.some((i) => i.path.join(".") === "state.completed")).toBe(true);
+  });
+
+  it("still accepts a batch with no events", () => {
+    expect(eventBatchSchema.safeParse(baseBatch({ events: [] })).success).toBe(true);
+  });
 });
 
 describe("MAX_BODY_BYTES", () => {

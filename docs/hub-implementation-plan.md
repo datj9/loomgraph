@@ -178,6 +178,15 @@ and the field disagree, at path `state.nodes.<key>.nodeId`. `nodeId` stays on th
 type is self-describing when passed alone; the disagreement is what gets refused. Every
 mismatched entry is reported, not just the first.
 
+**Ordering and intra-batch duplicates are one rule.** `seq` must be strictly increasing across
+`events`, which refuses `[2,0,1]` and `[0,0]` with a single check and makes `EventBatch.events`'
+"ordered by seq" comment true rather than decorative. This governs only a single batch's
+internal coherence; across-batch replay is still 1.5's dedupe by primary key. Every numeric
+field is range-constrained too - `seq` is a non-negative integer so it can never collide with
+the `NO_EVENTS_YET` return sentinel, `costUsd`/`spent.*` are non-negative, and `budget.*`
+mirrors `src/core/graph.ts` exactly, because a wire looser than the engine's own graph parser
+would accept a budget the engine itself rejects.
+
 `varKeys: string[]` rather than `vars` with nulled values is deliberate: a map whose values
 are `null` still has a slot a later change can refill, and nothing would fail. A list of key
 names has nowhere to put a value at all. Prefer the type that makes the mistake
@@ -324,6 +333,10 @@ Routes: `GET /v1/health` → `{ok:true, version}`, unauthenticated. `POST /v1/ev
   must not store any part of the batch.
 - A `nodes` entry whose map key disagrees with its `nodeId` is the same 400
   `{error:"run identity mismatch"}` as a `runId` or `graphName` mismatch, and stores nothing.
+- The same 400 covers every incoherence the schema refuses: a `seq` that is not strictly
+  increasing across the batch, an event line whose own `runId` disagrees with the batch's, a
+  `completed` id absent from `nodes`, a duplicate in `varKeys`, and any out-of-range numeric.
+  All of them store nothing.
 - The handler switches on `result.conflict` from `HubStore.ingest`. `true` becomes 409
   `{error:"seq conflict", runId, seq}`; `false` becomes 200 with the high-water mark. Do not
   test for the presence of a field to tell the two apart - narrow on the tag.
