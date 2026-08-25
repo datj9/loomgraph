@@ -122,6 +122,14 @@ const projectedStateSchema = z
   })
   .strict();
 
+/**
+ * Deliberately NOT strict, unlike the projected schemas above. The hub stores each line
+ * verbatim and projects only `(seq, kind, nodeId)` out of it, so an unknown top-level key is
+ * inert data - refusing it buys no safety and would break forward compatibility (a member on
+ * a newer `lg` than the hub could not sync at all, failing as a 400 on a whole batch).
+ * ProjectedState and ProjectedNode ARE strict because an unknown key there is an
+ * unclassified field that might carry content. Do not add `.strict()` here.
+ */
 const eventSchema = z
   .object({
     ts: z.string(),
@@ -140,8 +148,7 @@ const eventSchema = z
     ]),
     nodeId: z.string().optional(),
     data: z.record(z.string(), z.unknown()),
-  })
-  .strict();
+  });
 
 /**
  * The verbatim-line rule is load-bearing. The server zod-parses each line to validate it

@@ -61,6 +61,25 @@ describe("eventBatchSchema", () => {
     expect(JSON.parse(line ?? "").seq).toBe(0);
   });
 
+  it("accepts a line carrying an unknown top-level key and returns it byte-identically", () => {
+    const line = rawLine.slice(0, -1) + ',"futureKey":{"x":1}}';
+    const batch = baseBatch({ events: [line] });
+    const result = eventBatchSchema.safeParse(batch);
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.events[0]).toBe(line);
+  });
+
+  it("rejects a line that is missing seq", () => {
+    const line = rawLine.replace(',"seq":0', "");
+    expect(eventBatchSchema.safeParse(baseBatch({ events: [line] })).success).toBe(false);
+  });
+
+  it("rejects a line whose kind is not one of the known kinds", () => {
+    const line = rawLine.replace('"kind":"run_started"', '"kind":"run_exploded"');
+    expect(eventBatchSchema.safeParse(baseBatch({ events: [line] })).success).toBe(false);
+  });
+
   it("rejects a state carrying an unknown extra key", () => {
     const state = { ...baseState(), vars: {} };
     expect(eventBatchSchema.safeParse(baseBatch({ state })).success).toBe(false);

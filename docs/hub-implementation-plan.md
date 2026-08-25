@@ -171,6 +171,16 @@ are `null` still has a slot a later change can refill, and nothing would fail. A
 names has nowhere to put a value at all. Prefer the type that makes the mistake
 unrepresentable over the one that merely avoids it today.
 
+**Strictness is asymmetric, deliberately.** `ProjectedState` and `ProjectedNode` are strict:
+an unknown key there is an unclassified field that might carry content, so fail-closed is
+right and is the reason the type exists. The per-line event schema is **not** strict: the hub
+stores the line verbatim and projects only `(seq, kind, nodeId)` out of it, so an unknown key
+is inert data. Refusing it would buy no safety and would break the forward compatibility
+design §6.5 promises - a member on a newer `lg` than the hub would be a member who cannot
+sync at all, failing as a 400 on a whole batch. Validate that `ts`, `runId`, `seq` and `kind`
+are present and well-typed, keep `nodeId` optional and `data` an object, and tolerate
+anything else. Do not "tighten" this later.
+
 **The verbatim-line rule is load-bearing.** The server zod-parses each line to validate it
 and to project `(seq, kind, node_id)` into columns, then stores **the original string**.
 Re-stringifying breaks §6.4's lossless export with no failing test.
