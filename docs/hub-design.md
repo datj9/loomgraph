@@ -311,7 +311,7 @@ CREATE TABLE events (
   prev_hash BLOB, row_hash BLOB NOT NULL,
   UNIQUE (member, stream_id, run_id, seq)
 );                          -- an ordinary rowid table: §6.2's cursor needs rowid to exist
-CREATE INDEX events_feed ON events(received_at, rowid);
+CREATE INDEX events_feed ON events(received_at);   -- see the note below on rowid
 
 -- the hash chain is global and single-writer; the head is updated inside the ingest
 -- transaction so it can never disagree with the rows
@@ -374,6 +374,14 @@ trigger, which is why this is written down here rather than left to be discovere
 column, which the keyset cursor in [§6.2](#62-pagination-is-keyset-not-byte-offsets)
 requires. Verified against this machine's `node:sqlite` — `SELECT rowid` on a
 `WITHOUT ROWID` table fails with `no such column: rowid`.
+
+The index on `events` is `(received_at)` alone, for the same reason and verified the same way:
+`rowid` is not referenceable inside an index expression, so
+`CREATE INDEX ... ON events(received_at, rowid)` fails with `no such column: rowid` on SQLite
+3.51.3. It is also unnecessary - every SQLite index on a rowid table implicitly ends in `rowid`,
+so `(received_at)` already gives the `(received_at, rowid)` ordering
+[§6.2](#62-pagination-is-keyset-not-byte-offsets) needs. Two forms of the same mistake: do not
+write `rowid` into a `WITHOUT ROWID` table, and do not write it into an index.
 
 ### 6.4 The greppable artifact survives as an export
 

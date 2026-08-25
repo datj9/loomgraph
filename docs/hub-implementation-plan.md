@@ -9,9 +9,11 @@ Revision 2 of this plan applies an adversarial review whose findings were verifi
 the real tree. Four things it caught are worth knowing before reading further, because each
 one silently produces a wrong result rather than a failing build:
 
-- `WITHOUT ROWID` on `events` makes `(received_at, rowid)` cursors impossible — verified,
-  `SELECT rowid` fails with `no such column: rowid`. Design §6.3 is fixed; do not
-  reintroduce it.
+- **`rowid` is not writable into DDL, in two places.** `WITHOUT ROWID` on `events` makes
+  `(received_at, rowid)` cursors impossible - verified, `SELECT rowid` fails with `no such column:
+  rowid`. And `CREATE INDEX ... ON events(received_at, rowid)` fails the same way, because `rowid`
+  is not referenceable in an index expression; it is also redundant, since every index on a rowid
+  table implicitly ends in `rowid`. Design §6.3 is fixed for both; do not reintroduce either.
 - **`RunState` carries content**, not just status: `vars` values and `nodes[*].output` (raw
   agent stdout). Pushing it verbatim would publish secrets team-readable in phase 1, a phase
   before any masking exists. Commit 1.10 exists to prevent that and is not optional.
@@ -321,6 +323,17 @@ Rules an executor must not resolve differently:
 - Cursors are opaque base64 of `{receivedAt, rowid}`, keyset over `(received_at, rowid)`.
   Never a byte offset, never a client timestamp. A cursor that fails to decode is an error
   the caller maps to 400, not a silent reset.
+- **The feed is derived, not stored.** There is no `feed` table in design §6.3. `feed()` queries
+  `events` for rows whose `kind` is `run_started` or `run_finished` and maps each to a `FeedItem`
+  as: `ts` = the row's `received_at` (the hub's own stamp, never the client's `ts`), `member` =
+  the row's `member`, `kind` = the row's `kind`, `ref` = the row's `run_id`. Newest first by
+  `(received_at, rowid)`. Commit 1.7 and phase 4 both read the feed - they must not each invent
+  their own derivation.
+- **Known limitation: a `FeedItem` has no unique id.** It is `{ts, member, kind, ref}`, so two
+  `run_started` rows for one run would render as two indistinguishable items. Real runs emit one
+  each, so this is harmless in phase 1. It matters in phase 4, where `read_marks` is keyed
+  `(member, kind, ref)` and therefore cannot tell two identical items apart. Do not add an id
+  field now - phase 4 decides that when it has a reason to.
 - `scopes` is stored as a JSON array string. `addMember` defaults to `["ingest","read"]`.
 - `keyId` is `randomBytes(4)` hex; the secret is `randomBytes(32)` base64url; the returned
   token is `lgt_<keyId>.<secret>` and is the only time it exists in full.
@@ -341,15 +354,22 @@ returns `NO_EVENTS_YET`; an empty batch against a run whose seq 0 is already sto
 `src/hub/auth.ts`:
 
 ```ts
-export function mintToken(): { keyId: string; secret: string; token: string }
-export function hashToken(secret: string): string   // sha256 of the SECRET ONLY, hex
+// The token primitives live in storage.ts (commit 1.5) and are IMPORTED, never redeclared:
+//   mintKeyId(), mintSecret(), hashSecret(secret), formatToken(keyId, secret)
+// A second copy of token minting or hashing is a security defect, the same way a second copy
+// of the scanner would be. auth.ts owns header parsing and member resolution only.
+import { hashSecret } from "./storage.js";
+
 export function parseToken(header: string | undefined): { keyId: string; secret: string } | null
 export function resolveMember(store: HubStore, header: string | undefined):
   { member: string; keyId: string; scopes: string[] } | null    // null => 401
 ```
 
-- `hashToken` hashes **the base64url secret string only**, not the whole `lgt_…` token, and
-  returns lowercase hex. Both sides must agree or every hub is subtly incompatible.
+- **`hashSecret` (imported from `storage.ts`) hashes the base64url secret string only**, never
+  the whole `lgt_…` token, and returns lowercase hex. Both sides of the wire must agree on this or
+  every hub is subtly incompatible, which is exactly why there is one implementation and not two.
+  `auth.ts` declares no `mintToken` and no `hashToken`; `HubStore.addMember` already mints, so
+  nothing else needs to.
 - Compare with `crypto.timingSafeEqual(Buffer.from(a,'hex'), Buffer.from(b,'hex'))`. Both
   are 32-byte digests so lengths match; **a stored hash of the wrong length resolves to
   null rather than throwing**, because `timingSafeEqual` throws on length mismatch and that
@@ -359,7 +379,8 @@ export function resolveMember(store: HubStore, header: string | undefined):
 Tests: valid resolves; unknown keyId null; correct keyId with wrong secret null; **valid
 keyId with a 3-character secret resolves null and does not throw**; revoked null; `undefined`,
 `""`, `"Bearer"`, `"Basic x"` and a token with no `.` all resolve null without throwing;
-`mintToken`'s output verifies against `hashToken` of its own secret.
+a token minted by
+`HubStore.addMember` resolves through `resolveMember`.
 
 ### 1.7 `feat: add the hub http handlers`
 
