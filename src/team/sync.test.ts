@@ -1,5 +1,6 @@
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -169,6 +170,28 @@ describe("pendingLines", () => {
 });
 
 describe("syncRun", () => {
+  it("the cursor never passes the last ack: every call fails and the cursor sits exactly where it started", async () => {
+    const { cwd, eventRoot, runId } = setupRun(8, 5);
+    const path = cursorFile(cwd, runId);
+    const before = readFileSync(path, "utf8");
+    const fetch: Fetch = async () => {
+      throw new Error("connect ECONNRESET");
+    };
+    const result = await syncRun({
+      f: fetch,
+      cfg: CFG,
+      cwd,
+      eventRoot,
+      runId,
+      state: makeState(runId),
+      opts: OPTS,
+      timeoutMs: 1000,
+    });
+    expect(result.ok).toBe(false);
+    expect(readFileSync(path, "utf8")).toBe(before);
+    expect(readCursor(cwd, runId)).toEqual({ ackedSeq: 5 });
+  });
+
   it("12. a successful sync advances the cursor to the returned highWaterSeq", async () => {
     const { cwd, eventRoot, runId } = setupRun(4);
     const fetch: Fetch = async () => ({ status: 200, json: async () => ({ highWaterSeq: 3 }) });
@@ -414,5 +437,154 @@ describe("syncRun", () => {
     expect(firstBatch.events).toHaveLength(6);
     expect(secondBatch.events).toEqual(firstBatch.events);
     expect(secondBatch.runId).toBe(runId);
+  });
+
+  it("17. a kill between windows leaves the cursor on the first window's ack, and the retry resends from exactly that point", async () => {
+    const { cwd, eventRoot, runId } = setupRun(600);
+    let calls = 0;
+    const failingFetch: Fetch = async (_url, _init) => {
+      calls += 1;
+      if (calls === 1) return { status: 200, json: async () => ({ highWaterSeq: 499 }) };
+      throw new Error("socket hang up mid-sync");
+    };
+    const first = await syncRun({
+      f: failingFetch,
+      cfg: CFG,
+      cwd,
+      eventRoot,
+      runId,
+      state: makeState(runId),
+      opts: OPTS,
+      timeoutMs: 5000,
+    });
+    expect(first.ok).toBe(false);
+    expect(readCursor(cwd, runId)).toEqual({ ackedSeq: 499 });
+    expect(readFileSync(cursorFile(cwd, runId), "utf8")).toBe('{"ackedSeq":499}\n');
+
+    let resend: EventBatch | null = null;
+    const workingFetch: Fetch = async (_url, init) => {
+      resend = JSON.parse(init.body ?? "null") as EventBatch;
+      return { status: 200, json: async () => ({ highWaterSeq: 599 }) };
+    };
+    const second = await syncRun({
+      f: workingFetch,
+      cfg: CFG,
+      cwd,
+      eventRoot,
+      runId,
+      state: makeState(runId),
+      opts: OPTS,
+      timeoutMs: 5000,
+    });
+    expect(second).toEqual({ ok: true, ackedSeq: 599 });
+
+    const seqs = resend!.events.map((line) => (JSON.parse(line) as { seq: number }).seq);
+    expect(seqs).toEqual(Array.from({ length: 100 }, (_, i) => 500 + i));
+  });
+
+  it("18. a window that never settles still fails the sync, bounded by the timer, leaving the cursor on the first ack", async () => {
+    const { cwd, eventRoot, runId } = setupRun(600);
+    let calls = 0;
+    const hangFetch: Fetch = (_url, _init) => {
+      calls += 1;
+      if (calls === 1) return Promise.resolve({ status: 200, json: async () => ({ highWaterSeq: 499 }) });
+      return new Promise<{ status: number; json(): Promise<unknown> }>(() => {});
+    };
+    const result = await syncRun({
+      f: hangFetch,
+      cfg: CFG,
+      cwd,
+      eventRoot,
+      runId,
+      state: makeState(runId),
+      opts: OPTS,
+      timeoutMs: 25,
+    });
+    expect(result.ok).toBe(false);
+    expect(readCursor(cwd, runId)).toEqual({ ackedSeq: 499 });
+  });
+
+  it("19. a failure on the very first window, with no existing cursor, writes no cursor file at all", async () => {
+    const { cwd, eventRoot, runId } = setupRun(4);
+    const fetch: Fetch = async () => {
+      throw new Error("connect ECONNREFUSED 127.0.0.1:8080");
+    };
+    const result = await syncRun({
+      f: fetch,
+      cfg: CFG,
+      cwd,
+      eventRoot,
+      runId,
+      state: makeState(runId),
+      opts: OPTS,
+      timeoutMs: 1000,
+    });
+    expect(result.ok).toBe(false);
+    expect(existsSync(cursorFile(cwd, runId))).toBe(false);
+  });
+
+  it("20. a 2xx high-water below the cursor rewinds it on purpose, and a healthy retry resends the recovered range", async () => {
+    // The downward move is DELIBERATE. When the hub reports a high-water BELOW the on-disk
+    // cursor - a hub restored from backup, or a different hub at the same URL - the rewind is
+    // the recovery path: pendingLines only ever sends events above the cursor, so a cursor
+    // pinned above the hub would silently drop everything below it and nothing self-heals.
+    // A max(cursor, highWaterSeq) guard would pin the cursor above the hub forever and make
+    // the gap permanent. Do not add such a guard.
+    const { cwd, eventRoot, runId } = setupRun(8, 5);
+    const rewindFetch: Fetch = async () => ({ status: 200, json: async () => ({ highWaterSeq: 3 }) });
+    const first = await syncRun({
+      f: rewindFetch,
+      cfg: CFG,
+      cwd,
+      eventRoot,
+      runId,
+      state: makeState(runId),
+      opts: OPTS,
+      timeoutMs: 1000,
+    });
+    expect(first).toEqual({ ok: true, ackedSeq: 3 });
+    expect(readCursor(cwd, runId)).toEqual({ ackedSeq: 3 });
+    expect(readFileSync(cursorFile(cwd, runId), "utf8")).toBe('{"ackedSeq":3}\n');
+
+    let resend: EventBatch | null = null;
+    const healthyFetch: Fetch = async (_url, init) => {
+      resend = JSON.parse(init.body ?? "null") as EventBatch;
+      return { status: 200, json: async () => ({ highWaterSeq: 7 }) };
+    };
+    const second = await syncRun({
+      f: healthyFetch,
+      cfg: CFG,
+      cwd,
+      eventRoot,
+      runId,
+      state: makeState(runId),
+      opts: OPTS,
+      timeoutMs: 1000,
+    });
+    expect(second).toEqual({ ok: true, ackedSeq: 7 });
+
+    const seqs = resend!.events.map((line) => (JSON.parse(line) as { seq: number }).seq);
+    expect(seqs).toEqual([4, 5, 6, 7]);
+  });
+
+  it("21. a failed sync leaves the cursor file byte-identical", async () => {
+    const { cwd, eventRoot, runId } = setupRun(6, 1);
+    const path = cursorFile(cwd, runId);
+    const before = readFileSync(path, "utf8");
+    const fetch: Fetch = async () => {
+      throw new Error("connect ECONNRESET");
+    };
+    const result = await syncRun({
+      f: fetch,
+      cfg: CFG,
+      cwd,
+      eventRoot,
+      runId,
+      state: makeState(runId),
+      opts: OPTS,
+      timeoutMs: 1000,
+    });
+    expect(result.ok).toBe(false);
+    expect(readFileSync(path, "utf8")).toBe(before);
   });
 });

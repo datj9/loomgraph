@@ -619,12 +619,14 @@ process has no pending timer once `stop()` has run.
 
 ### 1.14 `test: prove the client and hub agree`
 
-`src/hub/contract.test.ts`: a `Fetch` that calls `handle()` in-process against an in-memory
-store, replaying a fixture at `src/hub/fixtures/events.jsonl` (committed there — AGENTS.md
-forbids committing `.loomgraph/`). Assert the round trip, and assert `lg-hub export --jsonl`
-reproduces the ingested lines **byte-for-byte**, which is the only test of the losslessness
-claim. Plus the kill-mid-sync test in the spirit of `src/e2e.test.ts`: the cursor never
-passes the last ack.
+Two of this commit's three assertions landed earlier, where the code they cover was written:
+the byte-for-byte export claim is tested in `src/hub/export.test.ts` (commit `ff29542`), and the
+in-process contract replay - a fake `Fetch` wired straight to the real `handle()` against a real
+in-memory `HubStore` - is test 14 of `src/team/sync.test.ts` (commit `14391a4`). What remained,
+and what this commit adds, is the kill-mid-sync assertion: **the cursor never passes the last
+ack.** A cursor that advances past what the hub durably accepted loses those events permanently,
+with nothing failing - which is why it is asserted against the bytes on disk rather than the
+parsed value.
 
 ### 1.15 `docs: describe the hub in the readme`
 
@@ -640,6 +642,16 @@ real local run, `curl /v1/runs/...` returns it with no `vars` values and no node
 dead hub demonstrably changes nothing about a run.
 
 # Phase 2 — briefs
+
+**A cursor ahead of the hub is unrecoverable in phase 1.** `pendingLines` only sends events above
+the cursor, so if a client's cursor claims more than the hub holds - a hub restored from backup, or
+a different hub at the same URL - the events below it are never resent and the gap is permanent.
+The client cannot detect this alone: it has no way to learn which seqs the hub is missing. The hub
+does know, so the fix is a protocol change rather than a client fix - for example returning the
+hub's own high-water on a rejected or empty push, so the client can rewind to it. That is phase 2
+work; phase 1's only mitigation is that following a reported high-water downward
+([§1.14](#114-test-prove-the-cursor-never-passes-the-last-ack)) repairs the gap once the hub
+reports honestly.
 
 ### 2.1 `feat: encrypt hub items at rest`
 `src/hub/keys.ts`: `lg-hub init` generates a master key `0600`; per-item DEK wrapped with
