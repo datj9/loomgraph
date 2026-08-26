@@ -570,8 +570,15 @@ describe("packCommand", () => {
     const md = readFileSync(join(out, "handoff.md"), "utf8");
     // Both the long and the short form are gone, replaced by the placeholder.
     expect(md).toContain("${HOSTNAME}");
-    expect(md).not.toContain(`on ${host}`);
-    expect(md).not.toContain(`on ${short} `);
+    // The negative assertions must respect the same right-hand boundary the rewrite
+    // uses. On a single-label host (`server`, and every GitHub runner) `host === short`,
+    // so a plain substring check would match inside the `${short}-ci` control string and
+    // fail even though redaction was correct. Anchor on "not followed by a hostname
+    // character" instead, which is the property actually under test.
+    const bare = (h: string) =>
+      new RegExp(`on ${h.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z0-9.-])`);
+    expect(md).not.toMatch(bare(host));
+    expect(md).not.toMatch(bare(short));
     // A longer host that merely starts with the short form is untouched.
     expect(md).toContain(`${short}-ci`);
   });
