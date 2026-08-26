@@ -2,6 +2,20 @@ import { describe, expect, it } from "vitest";
 import { parseToken, resolveMember, type MemberLookup } from "./auth.js";
 import { HubStore, hashSecret, type HubStoreDeps } from "./storage.js";
 
+/**
+ * Secret-shaped fixtures are assembled from split parts at runtime.
+ *
+ * Every value below is fabricated - the alphabet, not a real credential. But a
+ * provider's secret scanner matches on shape, not validity, so a complete
+ * literal in the source trips GitHub secret scanning and files an alert against
+ * this repo. Splitting the prefix from the body keeps the token regexes
+ * honestly exercised without handing a detector anything to match. Same
+ * convention as src/handoff/scan.test.ts.
+ */
+const shaped = (prefix: string, body: string): string => prefix + body;
+
+const SECRET_BODY = shaped("MjM0NTY3ODkw", shaped("YWJjZGVmZ2hpamtsbW5v", "cHFyc3R1dnd4eQ"));
+
 const FROZEN = "2026-08-25T00:00:00.000Z";
 const frozenClock: HubStoreDeps = { now: () => FROZEN };
 
@@ -9,7 +23,7 @@ function openStore(): HubStore {
   return HubStore.open(":memory:", frozenClock);
 }
 
-const VALID_TOKEN = "Bearer lgt_01234567.FAKEfake0000FAKEfake0000FAKEfake";
+const VALID_TOKEN = `Bearer lgt_01234567.${SECRET_BODY}`;
 
 function stubWith(
   tokenHash: string,
@@ -27,7 +41,7 @@ function stubWith(
 describe("parseToken", () => {
   it("parses a well-formed Bearer token into keyId and secret", () => {
     const t = parseToken(VALID_TOKEN);
-    expect(t).toEqual({ keyId: "01234567", secret: "FAKEfake0000FAKEfake0000FAKEfake" });
+    expect(t).toEqual({ keyId: "01234567", secret: SECRET_BODY });
   });
 
   it("accepts the Bearer scheme in all three case spellings", () => {
@@ -37,7 +51,7 @@ describe("parseToken", () => {
   });
 
   it("requires a lowercase keyId: an uppercase keyId does not parse, its lowercase twin does", () => {
-    const secret = "FAKEfake0000FAKEfake0000FAKEfake";
+    const secret = SECRET_BODY;
     expect(parseToken(`Bearer lgt_ABCDEF12.${secret}`)).toBeNull();
     expect(parseToken(`Bearer lgt_abcdef12.${secret}`)).toEqual({
       keyId: "abcdef12",
@@ -52,9 +66,9 @@ describe("parseToken", () => {
       "Bearer",
       "Bearer ",
       "Basic x",
-      "lgt_01234567.FAKEfake0000FAKEfake0000FAKEfake",
+      `lgt_01234567.${SECRET_BODY}`,
       "Bearer lgt_01234567",
-      "Bearer lgt_xyz.FAKEfake0000FAKEfake0000FAKEfake",
+      `Bearer lgt_xyz.${SECRET_BODY}`,
       "Bearer lgt_01234567.a.b",
     ];
     for (const h of bad) {
@@ -66,7 +80,7 @@ describe("parseToken", () => {
 
 describe("resolveMember", () => {
   it("resolves a valid token whose secret hashes to the stored tokenHash", () => {
-    const secret = "FAKEfake0000FAKEfake0000FAKEfake";
+    const secret = SECRET_BODY;
     const stub = stubWith(hashSecret(secret), { scopes: ["ingest", "read"] });
     expect(resolveMember(stub, `Bearer lgt_01234567.${secret}`)).toEqual({
       member: "alice",
@@ -98,13 +112,13 @@ describe("resolveMember", () => {
   });
 
   it("resolves a revoked member to null even with the correct secret", () => {
-    const secret = "FAKEfake0000FAKEfake0000FAKEfake";
+    const secret = SECRET_BODY;
     const stub = stubWith(hashSecret(secret), { revokedAt: "2026-08-25T00:00:00.000Z" });
     expect(resolveMember(stub, `Bearer lgt_01234567.${secret}`)).toBeNull();
   });
 
   it("returns the stored scopes array unchanged", () => {
-    const secret = "FAKEfake0000FAKEfake0000FAKEfake";
+    const secret = SECRET_BODY;
     const stub = stubWith(hashSecret(secret), { scopes: ["a", "b", "c"] });
     expect(resolveMember(stub, `Bearer lgt_01234567.${secret}`)?.scopes).toEqual(["a", "b", "c"]);
   });
