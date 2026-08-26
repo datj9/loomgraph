@@ -55,6 +55,7 @@ where  succeeded   1         0.0000      0.0s
 done   succeeded   1         0.0000      0.0s
 
 budget  0.0000/0.0100 usd   0s/60s wall clock   3/5 node runs
+note: adapters that do not report a price (codex, command) record 0.0000 usd - the number is not estimated.
 ```
 
 Then:
@@ -70,7 +71,7 @@ lg events <runId>      # the full audit trail as JSONL
 ```yaml
 name: fix-failing-test
 
-budget:                    # enforced before every dispatch batch
+budget:                    # enforced before every node dispatch
   maxUsd: 2.00
   maxWallClockSec: 1800
   maxNodeRuns: 20
@@ -120,7 +121,11 @@ edges:
 
 Templates resolve against run state: `{{vars.ticket}}` (or the shorthand `{{ticket}}`) and `{{nodes.<id>.output}}`. An unresolvable reference is an error, not an empty string and never a passthrough — which is why node ids are restricted to `[A-Za-z0-9_-]`, 1 to 64 characters. A dot would collide with the reference syntax itself, so `lg validate` rejects it rather than letting `{{nodes.my.node.output}}` mean nothing at run time.
 
-Check a graph before running it — `lg validate` catches unknown node ids, cycles, missing budgets, and bad adapters:
+Check a graph before running it - `lg validate` catches unknown node ids, cycles, missing
+budgets, bad adapters, and `{{nodes.<id>.output}}` references to a node the graph never
+declares. Unknown *variable* references are not caught: `lg run --var` can supply a variable
+the `vars:` block never declares, so an undeclared `{{vars.x}}` is not statically decidable
+and stays a run-time error.
 
 ```bash
 lg validate examples/fix-failing-test.yaml
@@ -160,6 +165,22 @@ A paused human node resumes the same way:
 lg resume <runId> --answer approve="ship it"
 ```
 
+The node id has to be one the run is actually paused on. An unknown id, or one that is not
+awaiting an answer, exits 1 and names it - a typo used to be indistinguishable from a correct
+answer.
+
+### What cannot be resumed
+
+Only a run that stopped without reaching a verdict is resumable: killed, interrupted, or
+paused on a human node. A run whose status is already `failed` is not. `lg resume` on one
+prints `run "<id>" is already failed and cannot be resumed` and exits 1, and the same applies
+to a run that already succeeded.
+
+That covers a node that failed all its retries and a run stopped by a budget ceiling. There is
+no way to fix the cause and continue from the last checkpoint - you start a new run, from the
+top, and pay for the completed nodes again. The failed run's checkpoint and event log stay on
+disk so you can still read what happened. Resume rescues an interrupted run, not a failed one.
+
 ## Node types
 
 | Type | What it does | Fails when |
@@ -169,7 +190,23 @@ lg resume <runId> --answer approve="ship it"
 | `verifier` | Runs an agent CLI, then checks the output for a literal `pass` string | The `pass` string is absent |
 | `human` | Pauses the whole run and exits cleanly, holding zero context | Never — it waits |
 
-Every node accepts `retries` (default 0), `timeoutSec` (default 900), and `cwd`.
+Every node accepts `retries` (default 0), `timeoutSec` (default 900), and `cwd`. `timeoutSec`
+kills the process *group*, not just the direct child, so a command that backgrounds a
+grandchild still aborts at the deadline instead of holding the run open until the command ends
+on its own.
+
+A `human` node's field is `question`, not `prompt`. It is the one node type that dispatches
+nothing, so there is no prompt to send; writing `prompt:` on it fails validation with
+`question: Invalid input: expected string, received undefined`.
+
+```yaml
+approve:
+  type: human
+  question: "Ship the fix? Repro notes: {{nodes.reproduce.output}}"
+```
+
+The question is template-interpolated exactly like an agent prompt, so the reviewer reads the
+resolved text rather than a raw `{{nodes.reproduce.output}}`.
 
 A `command` node also accepts two optional assertions, because a shell command that exits 0
 having done nothing is not a passing check: `expectNonEmpty: true` fails the node when the
@@ -179,14 +216,22 @@ exist for.
 
 ## Budgets
 
-Three ceilings, all enforced *before* each dispatch batch **and once more before a run is
-allowed to finish successfully**, all recorded in the checkpoint:
+Three ceilings, all enforced *before every single node is dispatched* - each member of a
+fan-out batch and each retry attempt separately - **and once more before a run is allowed to
+finish successfully**, all recorded in the checkpoint:
 
 - `maxUsd` — summed from what the adapters actually report.
 - `maxWallClockSec` — measured from the run's creation, so it survives a resume.
 - `maxNodeRuns` — counts every attempt, retries included.
 
-Hitting a ceiling stops the run with status `failed`, a `budget_exceeded` event naming the ceiling, and exit code 3. Nothing further is dispatched.
+The ceilings are exclusive: the limit itself is allowed, and only going over it stops the run.
+`maxNodeRuns: 20` permits 20 node runs, and `maxUsd: 2.00` permits a run that spends exactly
+2.00.
+
+Crossing a ceiling stops the run with status `failed`, a `budget_exceeded` event naming the
+ceiling, and exit code 3. Nothing further is dispatched, and that is literal: a fan-out stops
+part-way through its batch, the nodes that were never admitted leave no side effect behind, and
+a retry that would cross the ceiling is not attempted.
 
 A ceiling breached by the final batch fails the run too. A node that already finished keeps
 its result — the run fails, the work does not unwind — so `lg status` still shows what was
@@ -230,20 +275,25 @@ review:
   pass: "PASS"
 ```
 
-Omit it and the CLI's own resolution decides, which is not always what the config says: with no `-m`, opencode ignored a configured `model` and fell through to a provider with no credentials. `OPENCODE_MODEL` is ignored — the flag is the only way. A `command` or `human` node that declares a model is a validation error rather than a silently ignored key.
+Omit it and the CLI's own resolution decides, which is not always what the config says: with no `-m`, opencode ignored a configured `model` and fell through to a provider with no credentials. `OPENCODE_MODEL` is ignored — the flag is the only way. A `command` or `human` node that declares a `model` - or an `adapter` - is a validation error
+rather than a silently ignored key.
 
 ### Environment
 
 | Variable | Effect |
 | --- | --- |
 | `CLAUDE_CONFIG_DIR` | Which Claude Code credential directory to use. Set it when your default `~/.claude` session is expired or you keep several logins side by side. |
-| `LOOMGRAPH_CODEX_SANDBOX` | Codex sandbox policy: `read-only` (default), `workspace-write`, or `bypass`. |
+| `LOOMGRAPH_CODEX_SANDBOX` | Codex sandbox policy: `read-only` (default), `workspace-write`, or `bypass`. Any other value is a hard error naming those three, rather than a silently wider or narrower sandbox. |
 
 ### Two failure modes worth knowing
 
 **An expired login does not look like an error.** Claude Code returns `subtype: "success"` *and* `is_error: true` when its OAuth session has lapsed, with the authentication message sitting in the `result` field. An adapter that trusts `subtype` alone records a node that spent nothing, changed nothing, and reported success. loomgraph checks both fields and fails the node with the message the CLI actually returned.
 
-**A verifier that cannot read the tree must fail, not pass.** Codex sandboxes the commands it runs, and some containers cannot start that sandbox at all — every read fails with `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`. A review under those conditions is worthless, so the verifier node fails and says why. Set `LOOMGRAPH_CODEX_SANDBOX=bypass` only when the host is already isolated.
+**A verifier that cannot read the tree must fail, not pass.** Codex sandboxes the commands it runs, and some containers cannot start that sandbox at all — every read fails with `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`. A review under those conditions is worthless, so any line
+beginning `bwrap:` on either stderr or stdout fails the node and is quoted back in the error.
+The exit code is not consulted for this: bubblewrap fails per tool call rather than at startup,
+so the realistic shape is codex exiting 0 with a confident verdict from a run that read
+nothing. Set `LOOMGRAPH_CODEX_SANDBOX=bypass` only when the host is already isolated.
 
 Both agent adapters close stdin before spawning. Codex otherwise prints `Reading additional input from stdin...` and waits until the node's timeout fires, which is indistinguishable from a slow model.
 
@@ -258,6 +308,10 @@ Both agent adapters close stdin before spawning. Codex otherwise prints `Reading
 | `lg validate <graph.yaml>` | Exit 0 if valid, else exit 1 with the specific error |
 | `lg report <runId> [--out path] [--publish] [--title t] [--visibility private\|org]` | Render the run to a self-contained html file; `--publish` hosts it with the `enclave` cli |
 | `lg events <runId> [--kind K]` | The JSONL audit trail, filterable |
+
+`lg report --visibility` accepts only `private` or `org`; anything else exits 1 and nothing is
+published. `lg events --kind` accepts only the nine kinds listed above; an unknown kind exits 1
+rather than printing nothing, which used to be indistinguishable from "no such events".
 
 Exit codes: `0` success, `1` validation or usage error, `2` run failed, `3` budget exceeded, `4` paused awaiting a human.
 
@@ -382,16 +436,27 @@ file-history snapshots, codex `base_instructions`, MCP config and permission mod
 dropped by the readers and never reach the page at all.
 
 Then the scanner runs, and `push` refuses on any hit. It knows URL-embedded credentials
-(`scheme://user:pass@host`), `Authorization: Bearer` / `Basic` headers, Anthropic, OpenAI,
-Stripe (`sk_` and `rk_`), GitHub, GitLab, Slack, AWS access key ids, GCP, HuggingFace
-(`hf_`), Google OAuth (`GOCSPX-`), npm and SendGrid key shapes, JWTs, PEM private keys,
-and token/secret/password assignments. The git remote is special-cased: it is published
+(`scheme://user:pass@host`), `Authorization: Bearer` / `Basic` headers in both their plain-text
+and JSON-encoded (`{"Authorization":"Bearer ..."}`) forms, `.netrc` rows
+(`machine <host> login <user> password <secret>`), the OAuth material an opencode `auth.json`
+stores under `refresh` / `access` / `credential`, Anthropic, OpenAI, Stripe (`sk_` and `rk_`),
+GitHub, GitLab, Slack, AWS access key ids, GCP, HuggingFace (`hf_`), Google OAuth (`GOCSPX-`),
+npm and SendGrid key shapes, JWTs, PEM private keys, and token / secret / password / api-key /
+bare `key` assignments. The git remote is special-cased: it is published
 verbatim and never passes through path rewriting, so a `user:password@` in it is stripped
 at the source.
 
 **This is an allowlist of shapes, not a proof.** A credential in a shape it has never seen
 goes straight through. Known gaps include AWS secret access keys, PEM bodies without a
-header, hex client secrets, and non-home absolute paths. Read the brief before you send
+header, hex client secrets, and non-home absolute paths.
+
+One gap is a deliberate trade: an *unquoted* assignment value shorter than eight characters is
+not treated as a credential, so a YAML line like `password: abc123` is missed. The alternative
+was a scanner that fires on ordinary prose - the line `Standalone token: user` blocked a real
+pack. A quoted value is caught at any length, and a genuine credential in a `KEY=value` line is
+longer than eight characters, so the `.env` shapes still fire.
+
+Read the brief before you send
 the link - it is one screen, and you are the last check. If the scanner cannot read a file
 it was asked to scan, it reports that as a finding rather than staying quiet, so "clean"
 always means "looked at and found nothing".

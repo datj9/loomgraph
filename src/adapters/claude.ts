@@ -1,4 +1,4 @@
-import { execa } from "execa";
+import { clampCostUsd, runProcess } from "./types.js";
 import type { Adapter, AdapterInput, AdapterOutput } from "./types.js";
 
 /**
@@ -59,7 +59,7 @@ export function parseClaudeJson(stdout: string): AdapterOutput {
   }
 
   // Cost is harvested even on failure - budget accounting depends on it.
-  const costUsd = typeof result.total_cost_usd === "number" ? result.total_cost_usd : 0;
+  const costUsd = clampCostUsd(result.total_cost_usd);
   const text = typeof result.result === "string" ? result.result : "";
 
   // Claude Code can report `subtype: "success"` while `is_error` is true - an
@@ -91,17 +91,22 @@ export class ClaudeAdapter implements Adapter {
 
   async run(input: AdapterInput): Promise<AdapterOutput> {
     const args = buildClaudeArgs(input.prompt, input.maxTurns, input.model);
-    const result = await execa(this.bin, args, {
-      cwd: input.cwd,
-      timeout: input.timeoutSec * 1000,
-      reject: false,
-      // Keep the run non-interactive: an open stdin can stall the CLI until the
-      // node's timeout fires, which is indistinguishable from a hung model call.
-      input: "",
-    });
+    const result = await runProcess(this.bin, args, { cwd: input.cwd, timeoutSec: input.timeoutSec });
 
-    const stdout = typeof result.stdout === "string" ? result.stdout : "";
-    const stderr = typeof result.stderr === "string" ? result.stderr : "";
+    const { stdout, stderr } = result;
+
+    // Without this the spawn error is swallowed, the adapter parses an empty
+    // stdout, and the run fails with "could not parse claude json output:" -
+    // which never names the binary that is missing.
+    if (result.spawnErrorCode === "ENOENT") {
+      return {
+        ok: false,
+        text: "",
+        costUsd: 0,
+        raw: { stdout, stderr },
+        error: `${this.bin} not found on PATH`,
+      };
+    }
 
     if (result.timedOut) {
       return { ok: false, text: stdout, costUsd: 0, raw: { stdout, stderr }, error: `timeout after ${input.timeoutSec}s` };

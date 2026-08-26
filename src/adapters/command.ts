@@ -1,4 +1,4 @@
-import { execa } from "execa";
+import { runProcess } from "./types.js";
 import type { Adapter, AdapterInput, AdapterOutput } from "./types.js";
 
 /**
@@ -9,17 +9,17 @@ export class CommandAdapter implements Adapter {
   readonly name = "command";
 
   async run(input: AdapterInput): Promise<AdapterOutput> {
-    const result = await execa(input.prompt, {
-      shell: true,
+    const result = await runProcess(input.prompt, [], {
       cwd: input.cwd,
-      timeout: input.timeoutSec * 1000,
-      reject: false,
-      all: false,
+      timeoutSec: input.timeoutSec,
+      shell: true,
     });
 
-    const stdout = typeof result.stdout === "string" ? result.stdout : "";
-    const stderr = typeof result.stderr === "string" ? result.stderr : "";
+    const { stdout, stderr } = result;
 
+    // The timeout check comes first on purpose: the shell can exit 0 long
+    // before the deadline while a backgrounded grandchild keeps the run alive,
+    // so a zero exit code says nothing about whether the run completed.
     if (result.timedOut) {
       return {
         ok: false,
@@ -30,7 +30,7 @@ export class CommandAdapter implements Adapter {
       };
     }
 
-    if (result.failed || result.exitCode !== 0) {
+    if (result.exitCode !== 0) {
       const code = result.exitCode ?? "unknown";
       return {
         ok: false,

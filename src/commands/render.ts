@@ -140,9 +140,10 @@ export function renderReportHtml(state: RunState, events: LgEvent[]): string {
     `${state.spent.nodeRuns}/${state.budget.maxNodeRuns} node runs`;
 
   return (
-    "<!doctype html>" +
-    "<html>" +
+    "<!DOCTYPE html>" +
+    '<html lang="en">' +
     "<head>" +
+    '<meta charset="utf-8">' +
     `<title>loomgraph run ${esc(state.runId)}</title>` +
     "<style>" +
     "body{font-family:system-ui,sans-serif;margin:2rem;max-width:64rem}" +

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { homedir, hostname, tmpdir, userInfo } from "node:os";
 import { packCommand, pushCommand, scanCommand, type Exec } from "./commands.js";
 import { SHARE_URL_FILE, writeBundle } from "./bundle.js";
 
@@ -346,6 +346,45 @@ describe("pushCommand", () => {
     expect(lines).toContain("https://enclave.example/a/art_1");
     expect(lines.some((l) => l.includes("no share url"))).toBe(true);
   });
+
+  it("refuses an impossible date for --expires before publishing", async () => {
+    // 2026-13-45 is well-shaped and completely unreal. Before this gate it
+    // reached enclave and became an error only AFTER the artifact was live.
+    const dir = tempDir();
+    goodBundle(dir);
+    const { log, lines } = collector();
+
+    const code = await pushCommand(
+      dir,
+      { expires: "2026-13-45", dryRun: false, visibility: "private" },
+      forbiddenExec.exec,
+      log,
+    );
+
+    expect(code).toBe(1);
+    expect(lines.some((l) => l.includes("2026-13-45"))).toBe(true);
+    expect(forbiddenExec.calls).toHaveLength(0);
+  });
+
+  it("returns 1 for a bundle directory that does not exist, matching scan", async () => {
+    // A typo'd path is a usage error, not an unexpected failure. scan already
+    // answers 1 for exactly this; push answering 2 made the same mistake read
+    // as two different classes of problem depending on which verb you typed.
+    const { log, lines } = collector();
+    const missing = join(tempDir(), "nope");
+
+    const code = await pushCommand(
+      missing,
+      { expires: "7d", dryRun: false, visibility: "private" },
+      forbiddenExec.exec,
+      log,
+    );
+
+    expect(code).toBe(1);
+    expect(lines.some((l) => l.includes("no such bundle directory"))).toBe(true);
+    // Nothing was published: the missing directory is caught before enclave.
+    expect(forbiddenExec.calls).toHaveLength(0);
+  });
 });
 
 describe("scanCommand", () => {
@@ -379,6 +418,68 @@ describe("scanCommand", () => {
       true,
     );
     expect(lines.some((l) => l.includes(FAKE_AWS_KEY))).toBe(false);
+  });
+});
+
+describe("scanCommand / pushCommand - residual identity backstop", () => {
+  // scanBundleDir/scanText are parameterless with respect to identity, so a
+  // bundle where redaction is deliberately bypassed for one occurrence used
+  // to publish or scan clean. `commands.ts` is the only caller that knows
+  // the real hostname and username, so these prove it actually reaches the
+  // scan call for every command that gates on a scan, not only packCommand.
+  // Bundles here are hand-built (bypassing packCommand's rewritePaths
+  // entirely), standing in for "a replacement missed this one occurrence".
+
+  it("scanCommand reports a finding for a leftover OS account name instead of 'scan clean'", async () => {
+    const dir = tempDir();
+    goodBundle(dir);
+    const username = userInfo().username;
+    writeFileSync(join(dir, "handoff.md"), `still signed in as ${username}, again\n`, "utf8");
+    const { log, lines } = collector();
+
+    expect(await scanCommand(dir, log)).toBe(2);
+    expect(lines.some((l) => l.includes("residual-username"))).toBe(true);
+    expect(lines).not.toContain("scan clean");
+  });
+
+  it("scanCommand reports a finding for a leftover machine hostname instead of 'scan clean'", async () => {
+    const dir = tempDir();
+    goodBundle(dir);
+    const host = hostname();
+    writeFileSync(join(dir, "handoff.md"), `built on ${host}, again\n`, "utf8");
+    const { log, lines } = collector();
+
+    expect(await scanCommand(dir, log)).toBe(2);
+    expect(lines.some((l) => l.includes("residual-hostname"))).toBe(true);
+    expect(lines).not.toContain("scan clean");
+  });
+
+  it("scanCommand still reports clean for an ordinary bundle with no leftover identity", async () => {
+    const dir = tempDir();
+    goodBundle(dir);
+    const { log, lines } = collector();
+
+    expect(await scanCommand(dir, log)).toBe(0);
+    expect(lines).toContain("scan clean");
+  });
+
+  it("pushCommand refuses to publish a bundle with a leftover OS account name, without invoking enclave", async () => {
+    const dir = tempDir();
+    goodBundle(dir);
+    const username = userInfo().username;
+    writeFileSync(join(dir, "handoff.md"), `still signed in as ${username}, again\n`, "utf8");
+    const { log, lines } = collector();
+
+    const code = await pushCommand(
+      dir,
+      { expires: "7d", dryRun: false, visibility: "private" },
+      forbiddenExec.exec,
+      log,
+    );
+
+    expect(code).toBe(2);
+    expect(forbiddenExec.calls).toEqual([]);
+    expect(lines.some((l) => l.includes("residual-username"))).toBe(true);
   });
 });
 
@@ -437,6 +538,130 @@ describe("packCommand", () => {
 
     // Only git was spawned; packing never touches enclave.
     expect(new Set(fake.calls.map((c) => c.bin))).toEqual(new Set(["git"]));
+  });
+
+  it("rewrites the machine hostname out of a packed bundle", async () => {
+    // S1 added hostname rewriting to rewritePaths behind an optional parameter, but nothing
+    // passed one, so the fix was inert and hostnames still reached a published brief. This
+    // pins the wiring, not just the helper.
+    const host = hostname();
+    const short = host.split(".")[0]!;
+    const work = tempDir();
+    const sessionFile = join(work, "session.jsonl");
+    const turns = [
+      { type: "user", message: { role: "user", content: "why does it fail" } },
+      {
+        type: "assistant",
+        message: {
+          role: "assistant",
+          // Long form, then the bare short form. `${short}-ci` is a DIFFERENT host, so the
+          // bounded rewrite must leave it alone - that boundary is the point of the helper.
+          content: `fails on ${host} and on ${short} but never on ${short}-ci`,
+        },
+      },
+    ];
+    writeFileSync(sessionFile, turns.map((t) => JSON.stringify(t)).join("\n"), "utf8");
+    const out = join(work, "bundle");
+    const fake = gitExec();
+    const { log } = collector();
+
+    expect(await packCommand({ adapter: "claude", cwd: work, sessionFile, out }, fake.exec, log)).toBe(0);
+
+    const md = readFileSync(join(out, "handoff.md"), "utf8");
+    // Both the long and the short form are gone, replaced by the placeholder.
+    expect(md).toContain("${HOSTNAME}");
+    // The negative assertions must respect the same right-hand boundary the rewrite
+    // uses. On a single-label host (`server`, and every GitHub runner) `host === short`,
+    // so a plain substring check would match inside the `${short}-ci` control string and
+    // fail even though redaction was correct. Anchor on "not followed by a hostname
+    // character" instead, which is the property actually under test.
+    const bare = (h: string) =>
+      new RegExp(`on ${h.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z0-9.-])`);
+    expect(md).not.toMatch(bare(host));
+    expect(md).not.toMatch(bare(short));
+    // A longer host that merely starts with the short form is untouched.
+    expect(md).toContain(`${short}-ci`);
+  });
+
+  it("redacts the --title before it is written into the bundle", async () => {
+    // meta was built after redactSession and written straight out, so an author
+    // whose --title quoted a home path, the machine hostname or their account
+    // name published all three verbatim in meta.json, handoff.md and index.html.
+    const work = tempDir();
+    const sessionFile = join(work, "session.jsonl");
+    writeFileSync(sessionFile, CLAUDE_JSONL, "utf8");
+    const out = join(work, "bundle");
+    const host = hostname();
+    const home = homedir();
+    const username = userInfo().username;
+    const title = `fix ${home}/notes on ${host} for ${username} today`;
+    const fake = gitExec();
+    const { log } = collector();
+
+    expect(
+      await packCommand({ adapter: "claude", cwd: work, sessionFile, out, title }, fake.exec, log),
+    ).toBe(0);
+
+    const meta = JSON.parse(readFileSync(join(out, "meta.json"), "utf8"));
+    expect(meta.title).toBe("fix ${HOME}/notes on ${HOSTNAME} for user today");
+    for (const f of ["meta.json", "handoff.md", "index.html"]) {
+      const text = readFileSync(join(out, f), "utf8");
+      expect(text).not.toContain(home);
+      expect(text).not.toContain(host);
+      expect(text).not.toContain(` ${username} `);
+    }
+  });
+
+  it("redacts the created-by account name out of meta and the rendered brief", async () => {
+    // createdBy is userInfo().username - the exact token replaceUsernameToken
+    // scrubs everywhere else in the bundle. Rendering it in plaintext published
+    // the account name the rest of the pipeline is careful to remove.
+    const work = tempDir();
+    const sessionFile = join(work, "session.jsonl");
+    writeFileSync(sessionFile, CLAUDE_JSONL, "utf8");
+    const out = join(work, "bundle");
+    const username = userInfo().username;
+    const fake = gitExec();
+    const { log } = collector();
+
+    expect(
+      await packCommand({ adapter: "claude", cwd: work, sessionFile, out }, fake.exec, log),
+    ).toBe(0);
+
+    const meta = JSON.parse(readFileSync(join(out, "meta.json"), "utf8"));
+    expect(meta.createdBy).toBe("user");
+    expect(readFileSync(join(out, "handoff.md"), "utf8")).toContain("- created by: user");
+    for (const f of ["meta.json", "handoff.md", "index.html"]) {
+      const text = readFileSync(join(out, f), "utf8");
+      expect(new RegExp(`(^|[/\\\\@:\\s"'])${username}([/\\\\@:\\s"']|$)`).test(text)).toBe(
+        false,
+      );
+    }
+  });
+
+  it("redacts parser warnings, which quote transcript-derived values", async () => {
+    // Warnings are rendered into handoff.md verbatim and several of them quote
+    // transcript content (the git branch, unknown record type names), so they
+    // were a third path around redactSession.
+    const work = tempDir();
+    const sessionFile = join(work, "session.jsonl");
+    const home = homedir();
+    const records = [
+      { type: "user", gitBranch: `${home}/wip`, message: { role: "user", content: "go" } },
+      { type: "assistant", message: { role: "assistant", content: "done" } },
+    ];
+    writeFileSync(sessionFile, records.map((r) => JSON.stringify(r)).join("\n"), "utf8");
+    const out = join(work, "bundle");
+    const fake = gitExec();
+    const { log } = collector();
+
+    expect(
+      await packCommand({ adapter: "claude", cwd: work, sessionFile, out }, fake.exec, log),
+    ).toBe(0);
+
+    const md = readFileSync(join(out, "handoff.md"), "utf8");
+    expect(md).toContain('transcript git branch "${HOME}/wip" not carried');
+    expect(md).not.toContain(home);
   });
 
   it("strips credentials out of a remote url before publishing it", async () => {
@@ -571,6 +796,38 @@ describe("packCommand", () => {
     expect(lines.some((l) => l.includes("opencode export oc-1 --sanitize"))).toBe(true);
   });
 
+  it("reports a scan finding instead of 'scan clean' when redaction misses one occurrence of the username", async () => {
+    // Root cause under test: scanBundleDir/scanText are parameterless with
+    // respect to identity, so a missed replacement used to publish silently.
+    // packCommand is the only place that can build the redaction AND the scan
+    // call from the same known identity, so this pins it end to end rather
+    // than only at the scan.ts unit level.
+    const work = tempDir();
+    const sessionFile = join(work, "session.jsonl");
+    const username = userInfo().username;
+    // A shape rewritePaths' username boundary regex does not cover: the
+    // username immediately followed by a comma, which is not one of the
+    // boundary characters the replacement looks for. Stands in for "a
+    // replacement that missed an occurrence" without touching rewritePaths.
+    writeFileSync(
+      sessionFile,
+      `{"type":"user","sessionId":"s","message":{"role":"user","content":"ping ${username}, are you there"}}`,
+      "utf8",
+    );
+    const out = join(work, "bundle");
+    const { log, lines } = collector();
+
+    const code = await packCommand(
+      { adapter: "claude", cwd: work, sessionFile, out },
+      gitExec().exec,
+      log,
+    );
+
+    expect(code).toBe(2);
+    expect(lines.some((l) => l.includes("residual-username"))).toBe(true);
+    expect(lines).not.toContain("scan clean");
+  });
+
   it("returns 1 when opencode is not installed", async () => {
     const work = tempDir();
     const fake = fakeExec(() => ({ exitCode: 1, code: "ENOENT" }));
@@ -599,5 +856,32 @@ describe("packCommand", () => {
 
     expect(code).toBe(1);
     expect(lines).toContain("no such session");
+  });
+
+  it("drops a non-repo-relative path from files.txt and says so", async () => {
+    // files.txt is a repo-relative manifest. A bare absolute path outside the
+    // repo leaks the host filesystem layout, so it must not survive into the
+    // bundle - and dropping it silently is just as bad, because the author
+    // cannot tell the manifest is incomplete.
+    const work = tempDir();
+    const sessionFile = join(work, "session.jsonl");
+    writeFileSync(
+      sessionFile,
+      [
+        `{"type":"user","sessionId":"sess-9","cwd":"/repo/demo","message":{"role":"user","content":"read /opt/vendor/data/config.json then patch src/app.ts"}}`,
+      ].join("\n"),
+      "utf8",
+    );
+    const out = join(work, "bundle");
+    const fake = gitExec();
+    const { log, lines } = collector();
+
+    const code = await packCommand({ adapter: "claude", cwd: work, sessionFile, out }, fake.exec, log);
+
+    expect(code).toBe(0);
+    const filesTxt = readFileSync(join(out, "files.txt"), "utf8");
+    expect(filesTxt).not.toContain("/opt/vendor/data/config.json");
+    expect(filesTxt).toContain("src/app.ts");
+    expect(lines.some((l) => l.includes("/opt/vendor/data/config.json"))).toBe(true);
   });
 });

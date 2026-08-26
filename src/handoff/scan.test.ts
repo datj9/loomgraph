@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { SCAN_RULES, UNREADABLE_RULE, rewritePaths, scanBundleDir, scanText, stripUrlCredentials } from "./scan.js";
+import type { KnownIdentity } from "./scan.js";
 
 function rules(text: string): string[] {
   return scanText(text, "f.md").map((f) => f.rule);
@@ -60,7 +61,10 @@ describe("SCAN_RULES", () => {
       "huggingface-token",
       "google-oauth-secret",
       "auth-header",
+      "netrc-credentials",
+      "auth-json-credential",
       "abs-home-path",
+      "residual-local-hostname",
     ]);
   });
 });
@@ -169,6 +173,78 @@ describe("scanText — hits and near-misses per rule", () => {
     expect(fires("Authorization: " + "Bearer", "auth-header")).toBe(false);
   });
 
+  it("auth-header also matches the JSON-quoted form", () => {
+    const jsonBearer = '{"Authorization":"' + "Bearer " + shaped("FAKE", "faketoken0000") + '"}';
+    const jsonBasic = '{"Authorization": "' + "Basic " + shaped("dXNl", "cjpwYXNz") + '"}';
+    expect(fires(jsonBearer, "auth-header")).toBe(true);
+    expect(fires(jsonBasic, "auth-header")).toBe(true);
+    // The plain-text form must keep working.
+    expect(fires("Authorization: " + "Bearer " + shaped("FAKE", "faketoken0000"), "auth-header")).toBe(true);
+    // Scheme with no credential is still not a finding.
+    expect(fires('{"Authorization":"' + 'Bearer"}', "auth-header")).toBe(false);
+  });
+
+  it("auth-header covers non-Bearer/Basic auth schemes", () => {
+    // GitHub's own scheme name.
+    expect(fires("Authorization: token " + shaped("ghp", "_FAKEfake0000FAKEfake0000"), "auth-header")).toBe(true);
+    // A vendor-invented scheme name.
+    expect(fires("Authorization: ApiKey " + shaped("sk_live", "_FAKEfake0000FAKEfake0000"), "auth-header")).toBe(true);
+    // Digest auth, whose "value" is a list of quoted directives, not a bare token.
+    expect(
+      fires('Authorization: Digest username="alice", realm="api", response="' + shaped("FAKE", "fakedigest0000") + '"', "auth-header"),
+    ).toBe(true);
+    // AWS SigV4, whose scheme name itself contains digits and hyphens.
+    expect(
+      fires("Authorization: AWS4-HMAC-SHA256 Credential=" + shaped("AKIA", "FAKEFAKEFAKE0000") + "/20260101/us-east-1/s3/aws4_request", "auth-header"),
+    ).toBe(true);
+    // A scheme name with no credential-shaped value must still not fire.
+    expect(fires("Authorization: see the docs", "auth-header")).toBe(false);
+  });
+
+  it("netrc-credentials — the one-line form", () => {
+    const row = "machine api.example.com login alice password " + shaped("FAKE", "fakesecret0000");
+    expect(fires(row, "netrc-credentials")).toBe(true);
+    expect(fires("  machine gitlab.example.com login bot password " + shaped("FAKE", "fakesecret0000"), "netrc-credentials")).toBe(true);
+    // Prose that merely mentions the words is not a .netrc row.
+    expect(fires("the machine has a login and a password", "netrc-credentials")).toBe(false);
+    expect(fires("machine api.example.com login alice", "netrc-credentials")).toBe(false);
+  });
+
+  it("netrc-credentials — the real netrc(5) multi-line form", () => {
+    // A real .netrc file is one field per line, so the one-line rule can never
+    // see it: `scanText` splits on `\n` and runs every rule per line.
+    const multiline = [
+      "machine api.example.com",
+      "login myuser",
+      "password " + shaped("FAKE", "fakesecret0000"),
+    ].join("\n");
+    const hits = rules(multiline);
+    expect(hits).toContain("netrc-credentials");
+    // Must fire on the password line specifically (the line carrying the secret).
+    const findings = scanText(multiline, "f.md").filter((f) => f.rule === "netrc-credentials");
+    expect(findings.some((f) => f.line === 3)).toBe(true);
+
+    // A bare `login <value>` line alone (no password yet) is still worth flagging.
+    expect(fires("login myuser", "netrc-credentials")).toBe(true);
+    expect(fires("password " + shaped("FAKE", "fakesecret0000"), "netrc-credentials")).toBe(true);
+
+    // Prose that happens to start a sentence with these words must not fire:
+    // the rule only matches when the ENTIRE line is `keyword value`.
+    expect(fires("login to the dashboard first", "netrc-credentials")).toBe(false);
+    expect(fires("password reset instructions are below", "netrc-credentials")).toBe(false);
+    expect(fires("the login page needs a password", "netrc-credentials")).toBe(false);
+    expect(fires("See the login and password fields.", "netrc-credentials")).toBe(false);
+  });
+
+  it("auth-json-credential covers opencode auth.json shapes", () => {
+    expect(fires('{"refresh":"' + shaped("FAKE", "fakerefresh0000") + '"}', "auth-json-credential")).toBe(true);
+    expect(fires('{"access": "' + shaped("FAKE", "fakeaccess0000") + '"}', "auth-json-credential")).toBe(true);
+    expect(fires('{"credential":"' + shaped("FAKE", "fakecred0000") + '"}', "auth-json-credential")).toBe(true);
+    // Empty value is a placeholder, and prose is not a JSON credential.
+    expect(fires('{"access":""}', "auth-json-credential")).toBe(false);
+    expect(fires("refresh the access credential in the browser", "auth-json-credential")).toBe(false);
+  });
+
   it("env-assignment is case-insensitive and covers a json key", () => {
     expect(fires("database_password=hunter2xyz", "env-assignment")).toBe(true);
     expect(fires('"password": "hunter2xyz"', "env-assignment")).toBe(true);
@@ -176,6 +252,16 @@ describe("scanText — hits and near-misses per rule", () => {
     // Placeholders are not secrets.
     expect(fires("MY_SERVICE_TOKEN=", "env-assignment")).toBe(false);
     expect(fires('MY_SERVICE_TOKEN=""', "env-assignment")).toBe(false);
+  });
+
+  it("residual-local-hostname catches a leftover mDNS-style machine hostname", () => {
+    expect(fires("built on dats-macbook.local", "residual-local-hostname")).toBe(true);
+    // Case must not matter: this is exactly the shape a case-sensitive
+    // replacement would leave behind.
+    expect(fires("built on DATS-MACBOOK.local", "residual-local-hostname")).toBe(true);
+    expect(fires("built on Dats-MacBook.LOCAL".toLowerCase(), "residual-local-hostname")).toBe(true);
+    // Already rewritten.
+    expect(fires("built on ${HOSTNAME}", "residual-local-hostname")).toBe(false);
   });
 
   it("abs-home-path accepts a lower-case windows drive letter", () => {
@@ -200,6 +286,30 @@ describe("scanText — hits and near-misses per rule", () => {
     expect(fires("rotate the ENCLAVE_TOKEN weekly", "env-assignment")).toBe(false);
   });
 
+  it("env-assignment does not fire on prose that merely mentions a secret name", () => {
+    // This exact line blocked a real bundle. A short unquoted word is prose, not a secret.
+    expect(fires("Standalone token: user", "env-assignment")).toBe(false);
+    expect(fires("the secret: none", "env-assignment")).toBe(false);
+    expect(fires("password: yes", "env-assignment")).toBe(false);
+    // A secret name embedded in a longer word is not an assignment either.
+    expect(fires("monkey=" + shaped("FAKE", "fakevalue0000"), "env-assignment")).toBe(false);
+    // Real assignments must survive.
+    expect(fires("MY_SERVICE_TOKEN=" + shaped("FAKE", "fakevalue0000"), "env-assignment")).toBe(true);
+    expect(fires('APP_SECRET: "' + shaped("FAKE", "fakevalue0000") + '"', "env-assignment")).toBe(true);
+  });
+
+  it("env-assignment catches a bare key assignment in both shell and json shapes", () => {
+    expect(fires("key=" + shaped("FAKE", "fakevalue0000"), "env-assignment")).toBe(true);
+    expect(fires('{"key": "' + shaped("FAKE", "fakevalue0000") + '"}', "env-assignment")).toBe(true);
+    expect(fires('{"key":"' + shaped("FAKE", "fakevalue0000") + '"}', "env-assignment")).toBe(true);
+    expect(fires("MY_SERVICE_KEY=" + shaped("FAKE", "fakevalue0000"), "env-assignment")).toBe(true);
+    // The hyphenated spelling of the api key name.
+    expect(fires('API-KEY: "' + shaped("FAKE", "fakevalue0000") + '"', "env-assignment")).toBe(true);
+    // Placeholders stay placeholders.
+    expect(fires("key=", "env-assignment")).toBe(false);
+    expect(fires('key=""', "env-assignment")).toBe(false);
+  });
+
   it("abs-home-path", () => {
     expect(fires("/Users/someone/Documents/notes.md", "abs-home-path")).toBe(true);
     expect(fires("/home/someone/src/app.ts", "abs-home-path")).toBe(true);
@@ -208,6 +318,106 @@ describe("scanText — hits and near-misses per rule", () => {
     expect(fires("${HOME}/Documents/notes.md", "abs-home-path")).toBe(false);
     expect(fires("${REPO_ROOT}/src/app.ts", "abs-home-path")).toBe(false);
     expect(fires("look under /Users for the account list", "abs-home-path")).toBe(false);
+  });
+});
+
+describe("scanText — known-identity residual backstop", () => {
+  // rewritePaths only removes the hostname/username it is TOLD about. If a
+  // replacement is ever missed (case mismatch, an occurrence rewritePaths
+  // does not cover), the scan pass that runs afterward had no way to catch
+  // it - a silent identity leak, since an empty finding list reads as
+  // "clean, safe to publish". These pin the backstop that closes that gap.
+
+  it("flags a residual OS username when the caller supplies it", () => {
+    const identity: KnownIdentity = { username: "datnguyen" };
+    expect(scanText("still signed in as datnguyen on the box", "f.md", identity)).toEqual([
+      { rule: "residual-username", file: "f.md", line: 1, excerpt: "datn..." },
+    ]);
+  });
+
+  it("flags a residual non-.local corporate hostname when the caller supplies it", () => {
+    const identity: KnownIdentity = { hostname: "build-worker-07.corp.example.com" };
+    expect(fires("ran on build-worker-07.corp.example.com again", "residual-hostname")).toBe(false);
+    expect(
+      scanText("ran on build-worker-07.corp.example.com again", "f.md", identity).map((f) => f.rule),
+    ).toContain("residual-hostname");
+  });
+
+  it("flags the short form of a residual hostname too", () => {
+    const identity: KnownIdentity = { hostname: "build-worker-07.corp.example.com" };
+    const hits = scanText("ran on build-worker-07 again", "f.md", identity);
+    expect(hits.map((f) => f.rule)).toContain("residual-hostname");
+  });
+
+  it("username and hostname backstops are case-insensitive, matching the rewrite they backstop", () => {
+    const identity: KnownIdentity = { username: "datnguyen", hostname: "build-worker-07" };
+    expect(fires2("Signed in as DATNGUYEN", identity)).toContain("residual-username");
+    expect(fires2("host BUILD-WORKER-07 responded", identity)).toContain("residual-hostname");
+  });
+
+  it("does not fire when no identity is supplied - parameterless behavior is unchanged", () => {
+    expect(scanText("still signed in as datnguyen on the box", "f.md")).toEqual([]);
+  });
+
+  it("does not fire on an ordinary bundle with no leftover identity", () => {
+    const identity: KnownIdentity = { username: "datnguyen", hostname: "build-worker-07.corp.example.com" };
+    const clean = "A normal handoff brief about the task-list, nothing machine-specific.";
+    expect(scanText(clean, "f.md", identity)).toEqual([]);
+  });
+
+  it("does not rewrite/fire inside a longer word that merely contains the username", () => {
+    const identity: KnownIdentity = { username: "dat" };
+    expect(scanText("the dataset was validated; datadog alerts fired", "f.md", identity)).toEqual([]);
+  });
+
+  it("skips the residual-username backstop for a short username to avoid false positives on prose", () => {
+    // A 2-char username like "am" or "hi" is also common English - a bounded
+    // word-boundary match still fires on "I am" or "hi there" on every line
+    // of ordinary text. The trade-off taken here: usernames shorter than 3
+    // characters are not backstopped by the scanner (the rewrite itself
+    // still redacts them via rewritePaths - only the belt-and-suspenders
+    // scan check is skipped), since a noisy scanner that blocks legitimate
+    // prose gets ignored, which is worse than no backstop for that one case.
+    const identity: KnownIdentity = { username: "am" };
+    expect(scanText("I am happy to help, am I right?", "f.md", identity)).toEqual([]);
+  });
+
+  function fires2(text: string, identity: KnownIdentity): string[] {
+    return scanText(text, "f.md", identity).map((f) => f.rule);
+  }
+});
+
+describe("scanBundleDir — known-identity residual backstop", () => {
+  const dirs: string[] = [];
+
+  function makeDir(): string {
+    const dir = mkdtempSync(join(tmpdir(), "lg-scan-identity-"));
+    dirs.push(dir);
+    return dir;
+  }
+
+  afterEach(() => {
+    while (dirs.length > 0) {
+      const dir = dirs.pop();
+      if (dir) rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("threads the identity through to every file scanned", () => {
+    const dir = makeDir();
+    writeFileSync(join(dir, "clean.md"), "nothing to see here\n", "utf8");
+    writeFileSync(join(dir, "leak.md"), "still logged in as datnguyen\n", "utf8");
+
+    const findings = scanBundleDir(dir, { username: "datnguyen" });
+    expect(findings.map((f) => ({ rule: f.rule, file: f.file }))).toEqual([
+      { rule: "residual-username", file: "leak.md" },
+    ]);
+  });
+
+  it("reports clean with no identity supplied (unchanged parameterless behavior)", () => {
+    const dir = makeDir();
+    writeFileSync(join(dir, "leak.md"), "still logged in as datnguyen\n", "utf8");
+    expect(scanBundleDir(dir)).toEqual([]);
   });
 });
 
@@ -224,6 +434,16 @@ describe("scanText — shape of a finding", () => {
       expect(finding.excerpt).not.toContain("FAKEfake");
     }
     expect(JSON.stringify(findings)).not.toContain("FAKEfake");
+  });
+
+  it("masks the excerpt of the new credential shapes", () => {
+    const row = "machine api.example.com login alice password " + shaped("FAKE", "fakesecret0000");
+    const netrc = scanText(row, "f.md").find((f) => f.rule === "netrc-credentials");
+    expect(netrc?.excerpt).toBe("mach...");
+    const json = '{"refresh":"' + shaped("FAKE", "fakerefresh0000") + '"}';
+    const hit = scanText(json, "f.md").find((f) => f.rule === "auth-json-credential");
+    expect(hit?.excerpt.length).toBeLessThanOrEqual(7);
+    expect(hit?.excerpt).not.toContain("fakerefresh");
   });
 
   it("reports 1-based line numbers and echoes the file back", () => {
@@ -347,6 +567,67 @@ describe("rewritePaths", () => {
     });
     expect(fires(out, "abs-home-path")).toBe(false);
   });
+
+  it("rewrites the machine hostname in both its long and short forms", () => {
+    const out = rewritePaths(
+      "built on dats-macbook.local, short form dats-macbook, and dats-macbookpro stays",
+      {
+        home: "/Users/dat",
+        username: "dat",
+        repoRoot: "/Users/dat/app",
+        hostname: "dats-macbook.local",
+      },
+    );
+    expect(out).toBe(
+      "built on ${HOSTNAME}, short form ${HOSTNAME}, and dats-macbookpro stays",
+    );
+    expect(out).not.toContain("dats-macbook.local");
+  });
+
+  it("does not rewrite a hostname that is a prefix or suffix of a longer token", () => {
+    const out = rewritePaths("host web1 vs web10 vs web1a vs xweb1", {
+      home: "/opt/h",
+      username: "",
+      repoRoot: "/opt/r",
+      hostname: "web1",
+    });
+    expect(out).toBe("host ${HOSTNAME} vs web10 vs web1a vs xweb1");
+  });
+
+  it("rewrites the hostname regardless of case", () => {
+    const out = rewritePaths("built on DATS-MACBOOK.LOCAL and Dats-Macbook", {
+      home: "/Users/dat",
+      username: "dat",
+      repoRoot: "/Users/dat/app",
+      hostname: "dats-macbook.local",
+    });
+    expect(out).toBe("built on ${HOSTNAME} and ${HOSTNAME}");
+    expect(fires(out, "residual-local-hostname")).toBe(false);
+  });
+
+  it("rewrites the username regardless of case", () => {
+    const out = rewritePaths("author DAT pushed the change", {
+      home: "/Users/dat",
+      username: "dat",
+      repoRoot: "/Users/dat/app",
+    });
+    expect(out).toBe("author user pushed the change");
+  });
+
+  it("leaves the text alone when no hostname is supplied", () => {
+    const input = "built on dats-macbook.local";
+    expect(
+      rewritePaths(input, { home: "/Users/dat", username: "dat", repoRoot: "/Users/dat/app" }),
+    ).toBe(input);
+    expect(
+      rewritePaths(input, {
+        home: "/Users/dat",
+        username: "dat",
+        repoRoot: "/Users/dat/app",
+        hostname: "",
+      }),
+    ).toBe(input);
+  });
 });
 
 describe("scanBundleDir", () => {
@@ -457,5 +738,35 @@ describe("stripUrlCredentials", () => {
     const tokenAsUser = `https://${shaped("ghp", "_FAKEfake0000FAKEfake0000")}@github.com/o/r.git`;
     expect(stripUrlCredentials(tokenAsUser)).toBe(tokenAsUser);
     expect(scanText(tokenAsUser, "meta.json").map((f) => f.rule)).toContain("github-token");
+  });
+});
+
+describe("scanText - performance", () => {
+  it("scans a 64k single-character line in well under two seconds", () => {
+    // Regression guard: the env-assignment prefix used to rescan to end-of-line at
+    // every offset, which made this line take ~9 seconds.
+    const line = "a".repeat(65536);
+    const started = performance.now();
+    const findings = scanText(line, "big.md");
+    const elapsedMs = performance.now() - started;
+    expect(findings).toEqual([]);
+    expect(elapsedMs).toBeLessThan(2000);
+  });
+
+  it("scans a 100k-char hyphen-run line with no credentials in well under two seconds", () => {
+    // Regression guard: url-credentials' scheme quantifier was unbounded
+    // (`[a-z][a-z0-9+.-]*`), so a long hyphen/dot-separated token with no
+    // `://` anywhere made the engine greedily consume to end of line and
+    // then backtrack one character at a time at every word-boundary start -
+    // O(n) backtrack times O(n) starts. This exact shape (no scheme, no
+    // credentials, just a repeated hyphenated token) took ~4.2s before the
+    // fix; a plausible accidental line in any transcript, trivial to craft
+    // on purpose.
+    const line = "abc-def-ghi-jkl-".repeat(6250); // 100,000 chars
+    const started = performance.now();
+    const findings = scanText(line, "big.md");
+    const elapsedMs = performance.now() - started;
+    expect(findings).toEqual([]);
+    expect(elapsedMs).toBeLessThan(2000);
   });
 });

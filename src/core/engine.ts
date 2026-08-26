@@ -1,5 +1,5 @@
 import { isAbsolute, resolve } from "node:path";
-import type { Adapter, AdapterOutput } from "../adapters/types.js";
+import type { Adapter, AdapterInput, AdapterOutput } from "../adapters/types.js";
 import type { AdapterRegistry } from "../adapters/registry.js";
 import { checkBudget, recordSpend } from "./budget.js";
 import { END, type Edge, type Graph, type NodeDef } from "./graph.js";
@@ -13,6 +13,15 @@ export class EngineError extends Error {
     this.name = "EngineError";
   }
 }
+
+/**
+ * A template reference that cannot be resolved against the run state. Unlike
+ * transient adapter failures the error is deterministic: retrying would only
+ * burn attempts, so the engine fails the node instead of re-running it.
+ * Deliberately no own constructor: instances inherit EngineError's name, so
+ * code asserting the exact EngineError error keeps matching.
+ */
+export class TemplateError extends EngineError {}
 
 export interface EngineDeps {
   store: CheckpointStore;
@@ -65,10 +74,10 @@ export function interpolate(template: string, state: RunState): string {
     } else if (parts[0] === "nodes" && parts.length === 3 && parts[2] === "output") {
       value = state.nodes[parts[1]!]?.output;
     } else {
-      throw new EngineError(`unknown template reference "{{${ref}}}"`);
+      throw new TemplateError(`unknown template reference "{{${ref}}}"`);
     }
 
-    if (value === undefined) throw new EngineError(`unknown template reference "{{${ref}}}"`);
+    if (value === undefined) throw new TemplateError(`unknown template reference "{{${ref}}}"`);
     return typeof value === "string" ? value : JSON.stringify(value);
   });
 }
@@ -124,6 +133,30 @@ export function checkCommandExpectations(
   return null;
 }
 
+/** Escape a literal string so it can appear inside a RegExp. */
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * True when `pass` appears in `text` as a whole token, not as a raw substring.
+ * The token must not be glued to word characters on either side, so "PASS"
+ * matches "looks good - PASS" but not "PASSWORD" or "BYPASS". The pass string
+ * itself is otherwise matched literally.
+ *
+ * A boundary is only meaningful on a side where the pass string's own edge is
+ * a word character. `pass: "[PASS]"` has no word boundary to enforce - it is
+ * already self-delimiting - so demanding a non-word char before it would
+ * reject the verifier output `result[PASS]`, which plain substring matching
+ * accepted. Each side is therefore constrained independently.
+ */
+export function containsPassToken(text: string, pass: string): boolean {
+  const isWordChar = (c: string | undefined): boolean => c !== undefined && /[A-Za-z0-9_]/.test(c);
+  const lead = isWordChar(pass[0]) ? "(?:^|[^A-Za-z0-9_])" : "";
+  const trail = isWordChar(pass[pass.length - 1]) ? "(?:$|[^A-Za-z0-9_])" : "";
+  return new RegExp(`${lead}${escapeRegExp(pass)}${trail}`).test(text);
+}
+
 /**
  * The batches the scheduler would dispatch, in order. Pure - used by
  * `lg run --dry-run`, which must not spawn anything.
@@ -170,6 +203,17 @@ export async function execute(graph: Graph, initial: RunState, deps: EngineDeps)
   const answers = deps.humanAnswers ?? {};
 
   let state = initial;
+  // Shared with the admission pass below: set by both the batch admission and
+  // a retry refused inside executeNode, and always consumed by the budget
+  // stop path (emit budget_exceeded + finish("failed", reason)).
+  let budgetStopReason: string | null = null;
+  // CORE-1: node runs that have been dispatched but not yet folded into
+  // `state.spent`. `commit` only runs after a node finishes, so within a
+  // concurrent batch every sibling's in-flight attempts would otherwise be
+  // invisible to every other one. Each attempt reserves here before it
+  // dispatches; the batch loop settles the reservation against state.spent
+  // when the node's result lands. Always back to 0 between batches.
+  let reservedNodeRuns = 0;
   if (state.status === "succeeded" || state.status === "failed") {
     throw new EngineError(`run ${state.runId} is already ${state.status} and cannot be executed again`);
   }
@@ -201,10 +245,49 @@ export async function execute(graph: Graph, initial: RunState, deps: EngineDeps)
     let lastText = "";
 
     while (attempts < maxAttempts) {
+      // M2 / CORE-5b: resolve the templates before anything is reserved or
+      // announced. An unresolvable reference is deterministic, so retrying
+      // would only burn attempts: fail the node through the engine's normal
+      // failure path (commit emits node_finished; the batch branch below
+      // emits run_finished and persists "failed") instead of stranding the
+      // run. Because nothing was dispatched, the node is charged no run and
+      // no node_started is emitted for it. Anything else keeps propagating.
+      let dispatch: { adapter: Adapter; input: AdapterInput };
+      try {
+        dispatch = prepareDispatch(id, def);
+      } catch (err) {
+        if (err instanceof TemplateError) {
+          return {
+            nodeId: id, status: "failed", startedAt, endedAt: new Date().toISOString(),
+            attempts, output: lastText, error: err.message, costUsd,
+          };
+        }
+        throw err;
+      }
+
+      // C2 part B / CORE-1: a retry is a node run like any other, so one must
+      // never be spent once the ceilings would be crossed. Reserve the run
+      // against the shared counter before dispatching - not against a private
+      // projection of this node's own attempts - so concurrent siblings see
+      // each other's in-flight runs and the batch as a whole stays under the
+      // ceiling instead of overshooting by its width.
+      const projected = recordSpend(state, { usd: 0, nodeRuns: reservedNodeRuns + 1 });
+      const admission = checkBudget(projected);
+      if (!admission.ok) {
+        budgetStopReason = admission.reason;
+        // Only claim the budget as this node's own error when the node never
+        // got to run. Once an attempt has failed for a real reason, that
+        // reason is what an operator needs; overwriting it here is what let a
+        // budget stop bury a genuine failure in the run's finish reason.
+        if (attempts === 0) lastError = admission.reason;
+        break;
+      }
+      reservedNodeRuns += 1;
+
       attempts += 1;
       emit({ kind: "node_started", nodeId: id, data: { attempt: attempts, type: def.type } });
 
-      const out = await runOnce(id, def);
+      const out = await runOnce(id, def, dispatch);
       costUsd += out.costUsd;
       lastText = out.text;
 
@@ -218,33 +301,46 @@ export async function execute(graph: Graph, initial: RunState, deps: EngineDeps)
     return { nodeId: id, status: "failed", startedAt, endedAt: new Date().toISOString(), attempts, output: lastText, error: lastError, costUsd };
   };
 
-  const runOnce = async (id: string, def: NodeDef): Promise<AdapterOutput> => {
+  type Dispatch = { adapter: Adapter; input: AdapterInput };
+
+  /**
+   * Everything an attempt needs, resolved before the run is reserved against
+   * the budget or announced as node_started. Interpolation lives here rather
+   * than inside the dispatch so a TemplateError cannot charge a node run for
+   * an adapter call that never happened.
+   */
+  const prepareDispatch = (id: string, def: NodeDef): Dispatch => {
     const adapter = pickAdapter(def, registry);
     const cwd = nodeCwd(def, state);
 
     if (def.type === "command") {
-      const out = await adapter.run({ prompt: interpolate(def.run, state), cwd, timeoutSec: def.timeoutSec });
-      if (out.ok) {
-        const expectationError = checkCommandExpectations(def, out.text);
-        if (expectationError !== null) {
-          return { ...out, ok: false, error: expectationError };
-        }
-      }
-      return out;
+      return { adapter, input: { prompt: interpolate(def.run, state), cwd, timeoutSec: def.timeoutSec } };
     }
     if (def.type === "human") {
       throw new EngineError(`human node "${id}" cannot be dispatched to an adapter`);
     }
+    return {
+      adapter,
+      input: {
+        prompt: interpolate(def.prompt, state),
+        cwd,
+        maxTurns: def.maxTurns,
+        model: def.model,
+        timeoutSec: def.timeoutSec,
+      },
+    };
+  };
 
-    const out = await adapter.run({
-      prompt: interpolate(def.prompt, state),
-      cwd,
-      maxTurns: def.maxTurns,
-      model: def.model,
-      timeoutSec: def.timeoutSec,
-    });
+  const runOnce = async (id: string, def: NodeDef, dispatch: Dispatch): Promise<AdapterOutput> => {
+    const out = await dispatch.adapter.run(dispatch.input);
 
-    if (def.type === "verifier" && out.ok && !out.text.includes(def.pass)) {
+    if (def.type === "command" && out.ok) {
+      const expectationError = checkCommandExpectations(def, out.text);
+      if (expectationError !== null) {
+        return { ...out, ok: false, error: expectationError };
+      }
+    }
+    if (def.type === "verifier" && out.ok && !containsPassToken(out.text, def.pass)) {
       return { ...out, ok: false, error: `verifier "${id}" did not report the pass string "${def.pass}"` };
     }
     return out;
@@ -295,7 +391,18 @@ export async function execute(graph: Graph, initial: RunState, deps: EngineDeps)
     if (unanswered.length > 0) {
       for (const id of unanswered) {
         const def = graph.nodes[id]!;
-        emit({ kind: "human_requested", nodeId: id, data: { question: def.type === "human" ? def.question : "" } });
+        let question: string;
+        try {
+          // M5: the question shown to a reviewer is a template like any other -
+          // resolve {{vars.*}} and {{nodes.*.output}} exactly like agent prompts.
+          question = interpolate(def.type === "human" ? def.question : "", state);
+        } catch (err) {
+          // M2: an unresolvable reference is deterministic, so pausing with a
+          // broken question would strand the run. Fail through the normal path.
+          if (err instanceof TemplateError) return finish("failed", err.message);
+          throw err;
+        }
+        emit({ kind: "human_requested", nodeId: id, data: { question } });
       }
       state.status = "paused";
       state = store.save(state);
@@ -311,16 +418,53 @@ export async function execute(graph: Graph, initial: RunState, deps: EngineDeps)
 
     const batch = ready.filter((id) => graph.nodes[id]!.type !== "human");
     if (batch.length > 0) {
-      // Fan-out: the whole ready set runs concurrently, checkpointing as each lands.
+      // Admission pass: maxNodeRuns must bound work, not just batch boundaries.
+      // Project the spend one node at a time and ask checkBudget before each
+      // dispatch, so a node whose run would push the spent node-run count over
+      // the ceiling is never dispatched and leaves no side effect. Everything
+      // admitted still runs concurrently, checkpointing as each lands.
+      let projection = recordSpend(state, { usd: 0, nodeRuns: reservedNodeRuns });
+      const admitted: string[] = [];
+      for (const id of batch) {
+        projection = recordSpend(projection, { usd: 0, nodeRuns: 1 });
+        const admission = checkBudget(projection);
+        if (!admission.ok) {
+          budgetStopReason = admission.reason;
+          break;
+        }
+        admitted.push(id);
+      }
+
       const results = await Promise.all(
-        batch.map(async (id) => {
+        admitted.map(async (id) => {
           const result = await executeNode(id, graph.nodes[id]!);
+          // CORE-1: settle this node's reservations - commit folds exactly the
+          // same count into state.spent, so the two must move together with no
+          // await between them or a sibling would double-count the runs.
+          reservedNodeRuns -= result.attempts;
           commit(result);
           return result;
         }),
       );
 
       const failed = results.filter((r) => r.status === "failed");
+      // C2 part B: a retry refused by the budget must surface as budget_exceeded,
+      // exactly like the part A admission stop, not as a generic node failure.
+      if (budgetStopReason !== null) {
+        emit({ kind: "budget_exceeded", data: { reason: budgetStopReason, spent: state.spent, budget: state.budget } });
+        // The budget is the top-line cause - it is why the run stopped at this
+        // batch. But a sibling can fail for a reason of its own in the same
+        // batch, and that is the thing an operator has to fix before raising
+        // the ceiling would help, so name it too rather than let the budget
+        // message bury it. A node refused by the budget carries the budget
+        // reason as its own error; those are the same event, not a second one.
+        const genuine = failed.filter((r) => r.error !== budgetStopReason);
+        if (genuine.length > 0) {
+          const detail = genuine.map((r) => `${r.nodeId}: ${r.error}`).join("; ");
+          return finish("failed", `${budgetStopReason} - also failed - ${detail}`);
+        }
+        return finish("failed", budgetStopReason);
+      }
       if (failed.length > 0) {
         const detail = failed.map((r) => `${r.nodeId}: ${r.error}`).join("; ");
         return finish("failed", `node failed after ${failed[0]!.attempts} attempt(s) - ${detail}`);
