@@ -486,18 +486,116 @@ always means "looked at and found nothing".
   headings. There is no model call, so `pack` works offline and cannot invent a claim.
 - **`private` visibility only.** A transcript is production data. `--visibility org` and
   `public` are refused.
-- **No signal bus, inbox, or daemon.** That would contradict "Not a workflow server"
-  below, and an inbox that starts an agent on someone else's laptop is a different product
-  with a much harder threat model.
+- **No inbox.** An inbox that starts an agent on someone else's laptop is a different
+  product with a much harder threat model, and phase 1 ships no inbox - that is phase 3.
+  There is a daemon now, and the Hub section below is precise about what it does.
 
 Known rough edge: the `enclave share create --json` parser accepts several plausible field
 names because that stdout shape has not yet been captured from a real invocation.
+
+## The hub
+
+The third binary is `lg-hub`: an HTTP API in front of a single SQLite database. It
+stores what members push and serves reads out of that store - it never runs an agent.
+Agents run on the member's own machine, started by the member; the hub has no way to
+start one, and that absence is the design. A daemon that can only store and route is a
+store, not a scheduler.
+
+### Set one up
+
+On the hub host:
+
+```bash
+lg-hub init                      # create the data dir and hub.db
+lg-hub member add alice          # prints alice's token once - write it down
+lg-hub serve                     # binds 127.0.0.1:8369
+```
+
+On a member machine:
+
+```bash
+lg enroll http://10.0.0.5:8369 <token>  # identity lives in ~/.config/loomgraph/hub.json
+lg sync --enable                        # opt this repo in: .loomgraph/hub.json
+lg run examples/hello.yaml
+lg sync <runId>                         # push one run
+lg sync --all                           # or every run under .loomgraph/runs/
+```
+
+The rest of the hub-facing surface: `lg-hub member revoke <keyId>` and
+`lg-hub member ls` for the roster, `lg-hub export --jsonl` to print the raw stored
+lines to stdout for grepping, and `lg-hub export --out <dir>` to write one
+`runs/<member>/<runId>/events.jsonl` per run.
+
+### What the hub receives
+
+A sync pushes two things: the run's event lines verbatim - the same JSONL that sits
+under `.loomgraph/runs/<runId>/events.jsonl` - and a projection of the run state. The
+projection is where content stops. It is built field by field, never as a filtered
+copy of the full state, so there is no field a `vars` value or a node `output` could
+ride in on:
+
+- `vars` reach the hub as key names only.
+- node `output` never reaches the hub.
+- node `error` is path-rewritten, secret-masked, and capped at 200 characters.
+
+Same error before and after:
+
+```
+in : command exited with code 1: /home/alice/work/repo/run.sh: token sk-ant-api03-… rejected
+out: command exited with code 1: ${REPO_ROOT}/run.sh: token sk-a... rejected
+```
+
+### Tokens are possession-equals-identity
+
+Anyone holding a member token is that member to the hub. `member add` prints a token
+once and the store keeps only its hash, so it can never be printed again - treat it
+like an SSH key, and `member revoke <keyId>` is the off switch.
+
+### `serve` refuses a non-loopback bind
+
+`lg-hub serve` binds `127.0.0.1` by default and refuses any other host unless
+`--behind-tls-proxy` is passed. A bearer token over plaintext non-loopback HTTP is
+exactly the credential shape this project's own scanner has a rule for, so a bind that
+would put the token on the wire without TLS is an error rather than an option.
+
+### Two caveats, stated up front
+
+**Phase 1 does not mask on egress.** The projection is the only gate; whatever does
+reach the hub is served back as stored. A repository whose var *key names* are
+themselves sensitive should keep sync disabled - redaction-on-read is phase 2.
+
+**The masking is an allowlist, not a proof.** Error masking reuses `lg-handoff`'s
+`SCAN_RULES`, so it catches the shapes those rules know and nothing else. During
+development a test canary shaped `AKIA` plus 18 more characters passed through
+unmasked, because the rule is `\bAKIA[0-9A-Z]{16}\b` - exactly 20 characters. The
+canary was malformed rather than the rule being wrong, but that is exactly the point: a
+shape the rules do not cover reaches a team-readable field unmasked.
+
+### Verified against a live hub
+
+Both of these were run end to end against the built binary with a live hub:
+
+- **The export is byte-identical to the local log.** `lg-hub export` reproduces the
+  ingested lines exactly; it does not re-encode them.
+- **A dead hub changes neither the exit code nor the node outcomes.** The hub was
+  killed mid-exercise; the run was unaffected.
+
+### What phase 1 does not ship
+
+- No inbox - that is phase 3.
+- No web UI - that is phase 4.
+- No briefs on the hub, no encryption at rest, and no redaction on read - all phase 2.
+  Nothing in phase 1 is encrypted.
+- No full transcripts, ever. The handoff refusal stands unchanged: a transcript is a
+  credential dump, and syncing to the hub does not soften that.
 
 ## What this is not
 
 - **Not a model, and not an SDK for one.** loomgraph makes zero API calls of its own and has no LLM SDK dependency.
 - **Not a replacement for your agent CLI.** It shells out to the CLI you already installed and authenticated.
-- **Not a workflow server.** No daemon, no web UI, no cloud, no plugin system in v0.1.
+- **Not a workflow server.** A daemon ships in phase 1 - `lg-hub` - but it stores and
+  routes, and never runs an agent. No web UI (phase 4), no cloud, no plugin system in
+  v0.1.
 
 `lg report --publish` does not change that: it writes a static file and shells out to the
 `enclave` cli the same way a node shells out to `claude`. If `enclave` is not installed the

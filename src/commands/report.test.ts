@@ -11,6 +11,7 @@ import type { RunState } from "../core/types.js";
 function makeState(overrides: Partial<RunState> = {}): RunState {
   return {
     runId: "demo-20260814-120000-ab12",
+    streamId: "stream-1",
     graphName: "demo",
     status: "succeeded",
     createdAt: "2026-08-14T12:00:00.000Z",

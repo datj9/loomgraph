@@ -25,6 +25,7 @@ const VALID_KINDS = [
 function makeState(): RunState {
   return {
     runId: RUN_ID,
+    streamId: "stream-1",
     graphName: "demo",
     status: "succeeded",
     createdAt: "2026-08-14T12:00:00.000Z",

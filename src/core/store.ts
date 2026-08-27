@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import type { RunState } from "./types.js";
 
@@ -47,7 +48,26 @@ export class CheckpointStore {
   load(runId: string): RunState | null {
     const path = this.statePath(runId);
     if (!existsSync(path)) return null;
-    return JSON.parse(readFileSync(path, "utf8")) as RunState;
+    const state = JSON.parse(readFileSync(path, "utf8")) as RunState;
+
+    // A legacy checkpoint has no `streamId`. Derive a stable one in memory and
+    // WRITE NOTHING. Re-saving here would be wrong three ways:
+    //   1. `save` calls `this.load` (see above), so backfilling inside `load`
+    //      by calling `save` is mutual recursion between load and save.
+    //   2. `save` sets `seq: prev.seq + 1`, so a READ would advance the
+    //      checkpoint generation counter - and since `ProjectedState.seq` is
+    //      that same counter, the hub would see a generation increment no run
+    //      produced.
+    //   3. `save` stamps `updatedAt = now`, so merely running `lg status` or
+    //      `lg ls` would mark an untouched run as modified.
+    // The derivation is a uuid-formatted rendering of sha256("legacy:" + runId),
+    // so every load of the same legacy run agrees. The next legitimate `save()`
+    // persists it as a side effect of ordinary work.
+    if (!state.streamId) {
+      const digest = createHash("sha256").update(`legacy:${runId}`).digest("hex").slice(0, 32);
+      state.streamId = `${digest.slice(0, 8)}-${digest.slice(8, 12)}-${digest.slice(12, 16)}-${digest.slice(16, 20)}-${digest.slice(20)}`;
+    }
+    return state;
   }
 
   /**

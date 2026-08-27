@@ -64,6 +64,7 @@ describe("SCAN_RULES", () => {
       "netrc-credentials",
       "auth-json-credential",
       "abs-home-path",
+      "loomgraph-hub-token",
       "residual-local-hostname",
     ]);
   });
@@ -318,6 +319,19 @@ describe("scanText — hits and near-misses per rule", () => {
     expect(fires("${HOME}/Documents/notes.md", "abs-home-path")).toBe(false);
     expect(fires("${REPO_ROOT}/src/app.ts", "abs-home-path")).toBe(false);
     expect(fires("look under /Users for the account list", "abs-home-path")).toBe(false);
+  });
+
+  it("loomgraph-hub-token", () => {
+    const token = shaped("lgt_", "1a2b3c4d.FAKEfake0000FAKEfake0000FAKEfake0000");
+    expect(fires(`issued ${token} in prod`, "loomgraph-hub-token")).toBe(true);
+    // Near-misses: the bare prefix, and a tail too short to be a secret.
+    expect(fires("the lgt graph runner", "loomgraph-hub-token")).toBe(false);
+    expect(fires("lgt_1a2b3c4d.abcdefghij", "loomgraph-hub-token")).toBe(false);
+    // The finding never carries the whole secret.
+    const hit = scanText(`token: ${token}`, "f.md").find((f) => f.rule === "loomgraph-hub-token");
+    expect(hit).toBeDefined();
+    expect(hit?.excerpt).toBe("lgt_...");
+    expect(hit?.excerpt).not.toContain(token);
   });
 });
 

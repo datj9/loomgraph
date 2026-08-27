@@ -1,6 +1,9 @@
+import { homedir, userInfo } from "node:os";
 import { defaultRegistry } from "../adapters/registry.js";
 import { execute, readySet } from "../core/engine.js";
 import { parseGraph } from "../core/graph.js";
+import { makeRunBatcher, type BatchCtx } from "../team/batch.js";
+import { loadHubConfig, type Fetch } from "../team/transport.js";
 import { formatEventLine, openLog, openStore } from "./context.js";
 import { exitCodeFor, renderStatus } from "./render.js";
 
@@ -8,7 +11,16 @@ export interface ResumeOptions {
   answer: string[];
 }
 
-export async function resumeCommand(runId: string, options: ResumeOptions): Promise<number> {
+/** Injectable deps. Production leaves `f` unset so the global fetch is used. */
+export interface ResumeCommandDeps {
+  f?: Fetch;
+}
+
+export async function resumeCommand(
+  runId: string,
+  options: ResumeOptions,
+  deps: ResumeCommandDeps = {},
+): Promise<number> {
   const store = openStore();
   const log = openLog();
 
@@ -55,6 +67,23 @@ export async function resumeCommand(runId: string, options: ResumeOptions): Prom
     }
   }
 
+  const cwd = process.cwd();
+  const home = homedir();
+
+  // A1 is enforced by makeRunBatcher: when the hub is unconfigured or the repo
+  // has not opted in, this is a no-op that never touches the Fetch. An active
+  // batcher can still neither throw into the engine nor change a checkpoint.
+  const batcher = makeRunBatcher({
+    cfg: loadHubConfig(process.env, home),
+    cwd,
+    f: deps.f ?? (globalThis.fetch as Fetch),
+    ctx: {
+      runId,
+      store,
+      opts: { home, username: userInfo().username, repoRoot: cwd },
+    } satisfies BatchCtx,
+  });
+
   const final = await execute(graph, state, {
     store,
     log,
@@ -63,8 +92,14 @@ export async function resumeCommand(runId: string, options: ResumeOptions): Prom
     onEvent: (event) => {
       const line = formatEventLine(event);
       if (line) console.log(line);
+      batcher.onEvent(event);
     },
   });
+
+  // The final flush is bounded and never rejects, so a hung hub can delay the
+  // run by at most the flush ceiling and can never change its outcome.
+  await batcher.flush();
+  batcher.stop();
 
   console.log("");
   console.log(renderStatus(final));
