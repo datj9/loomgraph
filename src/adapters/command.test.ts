@@ -27,6 +27,18 @@ describe("CommandAdapter", () => {
     expect(out.error).toMatch(/timeout/i);
   });
 
+  it("fails at the timeout even when a grandchild outlives the shell", async () => {
+    // `sleep 30 &` leaves an orphan holding the stdout pipe. The shell exits 0
+    // immediately, but the pipe stays open, so the node used to stay blocked for
+    // the command's full 30s and only then relabel the result as a timeout.
+    const started = Date.now();
+    const out = await adapter.run({ prompt: "sleep 30 & echo started", cwd: tmpdir(), timeoutSec: 2 });
+    const elapsed = Date.now() - started;
+    expect(out.ok).toBe(false);
+    expect(out.error).toMatch(/timeout/i);
+    expect(elapsed).toBeLessThan(3500);
+  }, 20000);
+
   it("runs the command in the requested cwd", async () => {
     const out = await adapter.run({ prompt: "pwd", cwd: tmpdir(), timeoutSec: 10 });
     expect(out.ok).toBe(true);

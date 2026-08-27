@@ -52,11 +52,40 @@ export function buildEnclaveShareCreateArgs(artifactId: string, expires: string)
  * reject these locally first.
  */
 export function isValidExpires(value: string): boolean {
-  if (/^\d+[dhw]$/.test(value)) return true;
-  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return true;
-  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value)) return true;
-  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:\d{2})$/.test(value)) return true;
-  return false;
+  const duration = /^(\d+)[dhw]$/.exec(value);
+  if (duration !== null) return Number(duration[1]) >= 1;
+
+  const stamp =
+    /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2})(?::(\d{2})(?:Z|[+-]\d{2}:\d{2}))?)?$/.exec(value);
+  // The optional groups keep the original shape rule intact: a date-time
+  // without seconds carries no zone, and one with seconds must carry a zone.
+  if (stamp === null) return false;
+
+  return (
+    isRealDate(Number(stamp[1]), Number(stamp[2]), Number(stamp[3])) &&
+    isRealClock(stamp[4], stamp[5], stamp[6])
+  );
+}
+
+/**
+ * A real calendar date, not merely a well-shaped one. `2026-13-45` and
+ * `2026-02-30` pass any shape check but are rejected by enclave AFTER the
+ * artifact is published, which is the one moment a local gate exists to
+ * prevent. Date rollover is defeated by round-tripping every field back out.
+ */
+function isRealDate(year: number, month: number, day: number): boolean {
+  if (month < 1 || month > 12 || day < 1 || day > 31) return false;
+  const d = new Date(Date.UTC(year, month - 1, day));
+  return (
+    d.getUTCFullYear() === year && d.getUTCMonth() === month - 1 && d.getUTCDate() === day
+  );
+}
+
+/** Wall-clock bounds for the optional time part. Absent parts are valid. */
+function isRealClock(hh?: string, mm?: string, ss?: string): boolean {
+  if (hh === undefined) return true;
+  if (Number(hh) > 23 || Number(mm) > 59) return false;
+  return ss === undefined || Number(ss) <= 59;
 }
 
 export type EnclaveShareResult = { ok: true; url: string } | { ok: false; error: string };

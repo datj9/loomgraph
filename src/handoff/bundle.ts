@@ -32,8 +32,89 @@ const SKIPPED_DIRS = new Set(["node_modules", ".git"]);
 /** Where `push` records the print-once share url. Never part of a bundle. */
 export const SHARE_URL_FILE = "SHARE-URL.txt";
 
-/** Write every bundle file into `dir`, creating it (and parents) if missing. */
-export function writeBundle(dir: string, files: BundleFiles): void {
+/** Result of enforcing files.txt's repo-relative contract. */
+export interface SanitizedFilesTxt {
+  /** Every surviving line normalised to a repo-relative path, forward slashes. */
+  content: string;
+  /** Entries dropped because they could not be made repo-relative; never silent. */
+  excluded: string[];
+}
+
+/**
+ * Enforce files.txt's repo-relative contract: every line written must be a
+ * path relative to the repo root. Absolute in-repo paths (literal or the
+ * `rewritePaths` `${REPO_ROOT}` placeholder) are normalised to repo-relative;
+ * everything else - bare absolute POSIX paths outside the repo, Windows
+ * absolute paths, `${HOME}` escapes and any `..` that climbs above the root -
+ * is dropped and returned as `excluded` so the operator is told, exactly the
+ * way `checkEnclaveConstraints` surfaces violations.
+ */
+export function sanitizeFilesTxt(filesTxt: string, repoRoot?: string): SanitizedFilesTxt {
+  const kept: string[] = [];
+  const excluded: string[] = [];
+  for (const raw of filesTxt.split("\n")) {
+    const line = raw.trim();
+    if (line === "") continue;
+    const rel = toRepoRelative(line, repoRoot);
+    if (rel === null) excluded.push(line);
+    else kept.push(rel);
+  }
+  return {
+    content: kept.length === 0 ? "" : `${kept.join("\n")}\n`,
+    excluded,
+  };
+}
+
+/**
+ * Reduce `line` to a repo-relative path, or `null` when it cannot be made
+ * repo-relative. Backslashes are treated as separators everywhere (Windows
+ * style), and the emitted path always uses forward slashes.
+ */
+function toRepoRelative(line: string, repoRoot?: string): string | null {
+  // Windows absolute path (`C:\...` or `C:/...`) and UNC shares (`\\...`):
+  // a drive letter can never be repo-relative.
+  if (/^[A-Za-z]:[\\/]/.test(line) || line.startsWith("\\\\")) return null;
+  // Home-directory placeholder from rewritePaths: outside the repo by design.
+  if (line === "${HOME}" || line.startsWith("${HOME}/")) return null;
+
+  // The pipeline's own repo-root placeholder: `${REPO_ROOT}/src/app.ts`.
+  const marker = "${REPO_ROOT}";
+  if (line.startsWith(marker + "/") || line.startsWith(marker + "\\")) {
+    return normaliseRepoRelative(line.slice(marker.length).replace(/^[\\/]+/, ""));
+  }
+  if (line === marker) return null;
+
+  // A literal absolute POSIX path: repo-relative only when under the repo root.
+  if (line.startsWith("/")) {
+    if (repoRoot !== undefined) {
+      const root = repoRoot.replace(/[\\/]+$/, "");
+      if (line.startsWith(root + "/")) {
+        return normaliseRepoRelative(line.slice(root.length).replace(/^[\\/]+/, ""));
+      }
+    }
+    return null;
+  }
+
+  return normaliseRepoRelative(line);
+}
+
+/** Strip `./`, collapse `.`/`..` segments, and reject anything above the root. */
+function normaliseRepoRelative(rel: string): string | null {
+  const withSlashes = rel.replace(/\\/g, "/").replace(/^\.\//, "");
+  if (withSlashes === "") return null;
+  const normalized = posix.normalize(withSlashes);
+  if (normalized === "." || normalized === ".." || normalized.startsWith("../")) return null;
+  return normalized;
+}
+
+/**
+ * Write every bundle file into `dir`, creating it (and parents) if missing.
+ * `files.txt` is passed through `sanitizeFilesTxt` first so the manifest can
+ * never leak a host filesystem layout; the excluded entries are returned as
+ * the visible flag for the operator, mirroring how `checkEnclaveConstraints`
+ * returns violations instead of throwing.
+ */
+export function writeBundle(dir: string, files: BundleFiles, repoRoot?: string): string[] {
   mkdirSync(dir, { recursive: true });
   // A share url from a previous push must not survive into the next bundle.
   // enclave would upload it as an ordinary .txt file, so the new artifact would
@@ -41,9 +122,17 @@ export function writeBundle(dir: string, files: BundleFiles): void {
   // separately scoped. Nothing else in the pipeline would catch it: `.txt` is an
   // allowed extension and no scanner rule matches an enclave share url.
   rmSync(join(dir, SHARE_URL_FILE), { force: true });
+  let excluded: string[] = [];
   for (const name of Object.keys(files) as Array<keyof BundleFiles>) {
-    writeFileSync(join(dir, name), files[name], "utf8");
+    let body = files[name];
+    if (name === "files.txt") {
+      const sanitized = sanitizeFilesTxt(body, repoRoot);
+      body = sanitized.content;
+      excluded = sanitized.excluded;
+    }
+    writeFileSync(join(dir, name), body, "utf8");
   }
+  return excluded;
 }
 
 

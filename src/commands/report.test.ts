@@ -1,5 +1,10 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { delimiter, dirname, join } from "node:path";
+import { CheckpointStore } from "../core/store.js";
 import { escapeHtml, renderReportHtml } from "./render.js";
+import { reportCommand } from "./report.js";
 import type { LgEvent } from "../core/events.js";
 import type { RunState } from "../core/types.js";
 
@@ -45,7 +50,7 @@ describe("escapeHtml", () => {
 describe("renderReportHtml", () => {
   it("renders a complete html document for a run", () => {
     const out = renderReportHtml(makeState(), noEvents);
-    expect(out.startsWith("<!doctype html>")).toBe(true);
+    expect(out.startsWith("<!DOCTYPE html>")).toBe(true);
     expect(out).toContain("greet");
     expect(out).toContain("0.0000");
   });
@@ -84,7 +89,7 @@ describe("renderReportHtml", () => {
 
   it("renders a run with no nodes and no events", () => {
     const out = renderReportHtml(makeState({ nodes: {}, completed: [], status: "pending" }), noEvents);
-    expect(out.startsWith("<!doctype html>")).toBe(true);
+    expect(out.startsWith("<!DOCTYPE html>")).toBe(true);
     expect(out).toContain(
       "note: adapters that do not report a price (codex, command) record 0.0000 usd - the number is not estimated.",
     );
@@ -107,5 +112,188 @@ describe("renderReportHtml", () => {
     expect(out).toContain("node_started");
     expect(out).toContain("node_finished");
     expect(out).toContain("run_finished");
+  });
+});
+
+describe("renderReportHtml document contract", () => {
+  it("declares the document language on the root <html> element", () => {
+    const out = renderReportHtml(makeState(), noEvents);
+    expect(out).toContain('<html lang="en"');
+  });
+
+  it("emits a utf-8 charset meta tag inside <head>", () => {
+    const out = renderReportHtml(makeState(), noEvents);
+    expect(out).toContain('<meta charset="utf-8">');
+  });
+
+  it("declares the charset before <title> and within the first 1024 characters", () => {
+    const out = renderReportHtml(makeState(), noEvents);
+    const meta = out.indexOf('<meta charset=');
+    const title = out.indexOf("<title>");
+    expect(meta).toBeGreaterThanOrEqual(0);
+    expect(title).toBeGreaterThan(meta);
+    expect(meta).toBeLessThan(1024);
+  });
+
+  it("starts the document with a <!DOCTYPE html> declaration", () => {
+    const out = renderReportHtml(makeState(), noEvents);
+    expect(out.startsWith("<!DOCTYPE html>")).toBe(true);
+  });
+
+  it("keeps non-ASCII characters intact while still escaping hostile markup", () => {
+    const state = makeState({
+      graphName: "café → <plan>",
+      nodes: {
+        greet: {
+          nodeId: "greet", status: "failed",
+          startedAt: "2026-08-14T12:00:00.000Z", endedAt: "2026-08-14T12:00:30.000Z",
+          attempts: 1, output: "", error: "café → boom </td>", costUsd: 0,
+        },
+      },
+    });
+    const out = renderReportHtml(state, noEvents);
+    expect(out).toContain("café → &lt;plan&gt;");
+    expect(out).toContain("café → boom &lt;/td&gt;");
+    expect(out).not.toContain("<plan>");
+    expect(out).not.toContain("boom </td>");
+  });
+});
+
+describe("reportCommand --publish", () => {
+  const runId = "demo-20260814-120000-ab12";
+  const title = `loomgraph run ${runId}`;
+  const pushJson = JSON.stringify({
+    artifactId: "art-1",
+    versionId: "v1",
+    versionNo: 1,
+    viewUrl: "https://enclave.example/v/1",
+    uploaded: [],
+    skipped: [],
+  });
+
+  let work: string;
+  let fakeBin: string;
+  let capturedDir: string;
+  let capturedListing: string;
+  let originalCwd: string;
+  let originalPath: string | undefined;
+
+  beforeEach(() => {
+    work = mkdtempSync(join(tmpdir(), "lg-report-work-"));
+    fakeBin = mkdtempSync(join(tmpdir(), "lg-report-bin-"));
+    capturedDir = join(fakeBin, "dir.txt");
+    capturedListing = join(fakeBin, "listing.txt");
+    originalCwd = process.cwd();
+    originalPath = process.env.PATH;
+    process.chdir(work);
+
+    // A real run record, so reportCommand can find the run.
+    new CheckpointStore(join(work, ".loomgraph", "runs")).save(makeState());
+
+    // Decoys sitting in the working directory: the exact files that must never
+    // be uploaded when --publish is used.
+    writeFileSync(join(work, "hello.yaml"), "graph: {}\n", "utf8");
+    mkdirSync(join(work, ".loomgraph", "secrets"), { recursive: true });
+    writeFileSync(join(work, ".loomgraph", "secrets", "token.txt"), "token", "utf8");
+    writeFileSync(join(work, "other-report.html"), "<html>old</html>", "utf8");
+
+    // FAKE enclave: a stub script that records the directory it is told to
+    // publish and the listing of that directory, then answers like the real
+    // binary would. The real enclave on the host PATH is never touched.
+    const stub = join(fakeBin, "enclave");
+    writeFileSync(
+      stub,
+      [
+        "#!/bin/sh",
+        `printf '%s\\n' "$2" > "${capturedDir}"`,
+        `ls -A "$2" > "${capturedListing}"`,
+        `printf '%s' '${pushJson}'`,
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    chmodSync(stub, 0o755);
+    process.env.PATH = `${fakeBin}${delimiter}${originalPath}`;
+  });
+
+  afterEach(() => {
+    process.chdir(originalCwd);
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+    rmSync(work, { recursive: true, force: true });
+    rmSync(fakeBin, { recursive: true, force: true });
+  });
+
+  it("publishes only the generated report, never the working directory", async () => {
+    const out = join(work, "r1.html");
+    const code = await reportCommand(runId, { out, publish: true, title });
+
+    expect(code).toBe(0);
+    expect(existsSync(out)).toBe(true);
+
+    // The directory handed to the publisher must be neither the working
+    // directory nor the report's own parent (they are the same dir here).
+    const pushedDir = readFileSync(capturedDir, "utf8").trim();
+    expect(pushedDir).not.toBe(work);
+    expect(pushedDir).not.toBe(dirname(out));
+
+    // And it must contain exactly one entry: the report itself, none of the
+    // decoys (hello.yaml, .loomgraph/…, other-report.html).
+    const listing = readFileSync(capturedListing, "utf8")
+      .split("\n")
+      .filter((l) => l !== "");
+    expect(listing).toEqual(["r1.html"]);
+  });
+
+  it("removes the staging directory after publishing", async () => {
+    const out = join(work, "r1.html");
+    const code = await reportCommand(runId, { out, publish: true, title });
+
+    expect(code).toBe(0);
+    const pushedDir = readFileSync(capturedDir, "utf8").trim();
+    expect(pushedDir).not.toBe(work);
+    expect(existsSync(pushedDir)).toBe(false);
+  });
+
+  it("does not call the publisher at all without --publish", async () => {
+    const out = join(work, "r1.html");
+    const code = await reportCommand(runId, { out, title });
+
+    expect(code).toBe(0);
+    expect(existsSync(out)).toBe(true);
+    // The fake stub records nothing: never invoked.
+    expect(existsSync(capturedDir)).toBe(false);
+  });
+
+  it.each(["public", "hackerman"])(
+    "refuses --visibility %s with exit code 1 and never spawns enclave",
+    async (visibility) => {
+      const out = join(work, "r1.html");
+      const code = await reportCommand(runId, {
+        out,
+        publish: true,
+        visibility: visibility as "private" | "org",
+      });
+
+      expect(code).toBe(1);
+      expect(existsSync(out)).toBe(true);
+      // The fake stub records nothing: never invoked.
+      expect(existsSync(capturedDir)).toBe(false);
+    },
+  );
+
+  it.each(["private", "org"])("still accepts --visibility %s", async (visibility) => {
+    const out = join(work, "r1.html");
+    const code = await reportCommand(runId, {
+      out,
+      publish: true,
+      title,
+      visibility: visibility as "private" | "org",
+    });
+
+    expect(code).toBe(0);
+    expect(existsSync(out)).toBe(true);
+    // The fake stub was invoked and recorded the pushed directory.
+    expect(existsSync(capturedDir)).toBe(true);
   });
 });

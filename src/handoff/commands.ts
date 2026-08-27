@@ -14,7 +14,7 @@
  */
 
 import { existsSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { homedir, userInfo } from "node:os";
+import { homedir, hostname, userInfo } from "node:os";
 import { join, resolve } from "node:path";
 import { SHARE_URL_FILE, checkEnclaveConstraints, writeBundle } from "./bundle.js";
 import {
@@ -29,6 +29,7 @@ import { parseCodexSessionJsonl } from "./readers/codex.js";
 import { buildOpencodeExportArgs, parseOpencodeExportJson } from "./readers/opencode.js";
 import { renderFilesTxt, renderHandoffHtml, renderHandoffMd } from "./render.js";
 import { rewritePaths, scanBundleDir, stripUrlCredentials } from "./scan.js";
+import type { KnownIdentity } from "./scan.js";
 import type { DistilledSession, HandoffAdapter, HandoffMeta, ScanFinding } from "./types.js";
 
 /** The single spawn seam. Shaped after the subset of execa's result we use. */
@@ -84,28 +85,47 @@ export async function packCommand(
 
   const repo = await gatherRepoFacts(cwd, exec, log);
 
-  const meta: HandoffMeta = {
-    v: 1,
-    adapter: opts.adapter,
-    sessionId: session.sessionId,
-    title: opts.title ?? defaultTitle(opts.adapter, session.sessionId),
-    createdBy: userInfo().username,
-    createdAt: new Date().toISOString(),
-    repo,
-  };
+  const redaction = redactionOptions(cwd);
+  const meta = redactMeta(
+    {
+      v: 1,
+      adapter: opts.adapter,
+      sessionId: session.sessionId,
+      title: opts.title ?? defaultTitle(opts.adapter, session.sessionId),
+      createdBy: userInfo().username,
+      createdAt: new Date().toISOString(),
+      repo,
+    },
+    redaction,
+  );
 
-  const redacted = redactSession(session, cwd);
+  const redacted = redactSession(session, redaction);
   const handoffMd = renderHandoffMd(redacted, meta);
 
-  writeBundle(outDir, {
-    "index.html": renderHandoffHtml(handoffMd, meta),
-    "handoff.md": handoffMd,
-    "meta.json": `${JSON.stringify(meta, null, 2)}\n`,
-    "files.txt": renderFilesTxt(redacted),
-  });
+  const excluded = writeBundle(
+    outDir,
+    {
+      "index.html": renderHandoffHtml(handoffMd, meta),
+      "handoff.md": handoffMd,
+      "meta.json": `${JSON.stringify(meta, null, 2)}\n`,
+      "files.txt": renderFilesTxt(redacted),
+    },
+    cwd,
+  );
+  // files.txt is a repo-relative manifest. Anything that cannot be expressed
+  // relative to the repo root would leak the host filesystem layout, so it is
+  // dropped - but never silently: an author reading a short files.txt has to be
+  // able to tell the difference between "nothing else was touched" and "we
+  // refused to publish it".
+  for (const entry of excluded) {
+    log(`warning: dropped ${entry} from files.txt - it is not repo-relative`);
+  }
   log(`bundle written to ${outDir}`);
 
-  const findings = scanBundleDir(outDir);
+  // Threaded through so a redaction miss is a finding, not a silent "clean":
+  // `redaction` is the exact identity this bundle was just redacted against,
+  // and this is the only scan call in the module that can supply it.
+  const findings = scanBundleDir(outDir, { username: redaction.username, hostname: redaction.hostname });
   if (findings.length > 0) {
     printFindings(findings, log);
     log(
@@ -128,7 +148,7 @@ export async function scanCommand(dir: string, log: (s: string) => void): Promis
     log(`no such bundle directory: ${target}`);
     return 1;
   }
-  const findings = scanBundleDir(target);
+  const findings = scanBundleDir(target, localIdentity());
   if (findings.length > 0) {
     printFindings(findings, log);
     return 2;
@@ -152,6 +172,15 @@ export async function pushCommand(
 ): Promise<number> {
   const bundleDir = resolve(dir);
 
+  // Same usage error scanCommand already reports as 1. Without this the path
+  // fell through to the scanner's fail-closed finding and came back as 2, so
+  // the identical typo answered differently depending on the verb. Narrowly
+  // scoped: every other push failure keeps the exit code it has today.
+  if (!existsSync(bundleDir)) {
+    log(`no such bundle directory: ${bundleDir}`);
+    return 1;
+  }
+
   if (opts.visibility !== "private") {
     log(
       `refusing --visibility ${opts.visibility}: a handoff bundle quotes a real ` +
@@ -173,7 +202,7 @@ export async function pushCommand(
   // uploaded as a served page on the next push.
   rmSync(join(bundleDir, SHARE_URL_FILE), { force: true });
 
-  const findings = scanBundleDir(bundleDir);
+  const findings = scanBundleDir(bundleDir, localIdentity());
   if (findings.length > 0) {
     printFindings(findings, log);
     log("refusing to push: fix the findings above, then push again");
@@ -276,17 +305,69 @@ function parseTranscript(adapter: HandoffAdapter, text: string): DistilledSessio
   return parseOpencodeExportJson(text);
 }
 
+/** The one place the machine facts are read, so every redacted value uses the same set. */
+type Redaction = { home: string; username: string; repoRoot: string; hostname: string };
+
+function redactionOptions(repoRoot: string): Redaction {
+  return { home: homedir(), username: userInfo().username, repoRoot, hostname: hostname() };
+}
+
+/**
+ * The scan-time identity for `scanCommand` and `pushCommand`, which have no
+ * `Redaction` of their own - they scan a bundle that may have been packed on
+ * this machine (the common case) or copied in from elsewhere. Using the
+ * current machine's identity is the same backstop `packCommand` gets, at no
+ * cost: it can only ADD a finding, never suppress one, and it adds nothing if
+ * the bundle came from a different machine.
+ */
+function localIdentity(): KnownIdentity {
+  return { username: userInfo().username, hostname: hostname() };
+}
+
+function rewriteOrNull(value: string | null, opts: Redaction): string | null {
+  return value === null ? null : rewritePaths(value, opts);
+}
+
 /**
  * Rewrite every machine-specific path out of the session before it is rendered.
  * Returns a new session; the input is never mutated.
+ *
+ * `warnings` and `model` go through too: a warning quotes transcript-derived
+ * values (the git branch, unknown record type names) and is rendered verbatim
+ * into the brief, so it is as much untrusted text as a turn is.
  */
-function redactSession(session: DistilledSession, repoRoot: string): DistilledSession {
-  const opts = { home: homedir(), username: userInfo().username, repoRoot };
+function redactSession(session: DistilledSession, opts: Redaction): DistilledSession {
   return {
     ...session,
-    cwd: session.cwd === null ? null : rewritePaths(session.cwd, opts),
+    cwd: rewriteOrNull(session.cwd, opts),
+    model: rewriteOrNull(session.model, opts),
     turns: session.turns.map((turn) => ({ ...turn, text: rewritePaths(turn.text, opts) })),
     filesTouched: session.filesTouched.map((path) => rewritePaths(path, opts)),
+    warnings: session.warnings.map((warning) => rewritePaths(warning, opts)),
+  };
+}
+
+/**
+ * Redact the metadata block with exactly the same rules as the session.
+ *
+ * Every field here reaches meta.json, handoff.md and index.html: `title` is
+ * arbitrary author-supplied `--title` text, `sessionId` comes out of the
+ * transcript, and `createdBy` is the OS account name - the very token
+ * `rewritePaths` scrubs everywhere else in the bundle. Only `createdAt` (an ISO
+ * timestamp we generate) and `repo.sha` carry nothing machine-specific, and
+ * they cost nothing to run through anyway.
+ */
+function redactMeta(meta: HandoffMeta, opts: Redaction): HandoffMeta {
+  return {
+    ...meta,
+    title: rewritePaths(meta.title, opts),
+    sessionId: rewriteOrNull(meta.sessionId, opts),
+    createdBy: rewritePaths(meta.createdBy, opts),
+    repo: {
+      remote: rewriteOrNull(meta.repo.remote, opts),
+      sha: meta.repo.sha,
+      branch: rewriteOrNull(meta.repo.branch, opts),
+    },
   };
 }
 
