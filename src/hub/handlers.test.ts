@@ -71,6 +71,57 @@ function mint(store: HubStore, member: string, scopes: string[]): string {
   return store.addMember(member, scopes).token;
 }
 
+describe("web UI endpoints", () => {
+  it("GET /v1/runs lists runs for a read token", () => {
+    const store = openStore();
+    const deps = makeDeps(store);
+    const tok = mint(store, "alice", ["ingest", "read"]);
+    authed("POST", "/v1/events", deps, tok, {}, batchBody("run-1", "s-1", [evLine({ seq: 1 })]));
+    const res = authed("GET", "/v1/runs", deps, tok);
+    expect(res.status).toBe(200);
+    const runs = (res.body as { runs: Array<{ runId: string }> }).runs;
+    expect(runs.map((r) => r.runId)).toContain("run-1");
+  });
+
+  it("GET /v1/runs requires the read scope", () => {
+    const store = openStore();
+    const deps = makeDeps(store);
+    expect(authed("GET", "/v1/runs", deps, mint(store, "bob", ["ingest"])).status).toBe(403);
+  });
+
+  it("member roster requires the admin scope", () => {
+    const store = openStore();
+    const deps = makeDeps(store);
+    expect(authed("GET", "/v1/members", deps, mint(store, "carol", ["read"])).status).toBe(403);
+  });
+
+  it("admin can list, create and revoke members over HTTP", () => {
+    const store = openStore();
+    const deps = makeDeps(store);
+    const admin = mint(store, "root", ["read", "admin"]);
+
+    const created = authed("POST", "/v1/members", deps, admin, {}, { member: "dave", scopes: ["ingest", "read"] });
+    expect(created.status).toBe(200);
+    const body = created.body as { keyId: string; token: string };
+    expect(body.token.startsWith("lgt_")).toBe(true);
+
+    const list = authed("GET", "/v1/members", deps, admin);
+    const members = (list.body as { members: Array<{ member: string }> }).members;
+    expect(members.some((m) => m.member === "dave")).toBe(true);
+
+    const revoke = authed("POST", `/v1/members/${body.keyId}/revoke`, deps, admin, {}, {});
+    expect(revoke.status).toBe(200);
+    expect((revoke.body as { revoked: boolean }).revoked).toBe(true);
+  });
+
+  it("POST /v1/members rejects a missing name", () => {
+    const store = openStore();
+    const deps = makeDeps(store);
+    const admin = mint(store, "root", ["admin"]);
+    expect(authed("POST", "/v1/members", deps, admin, {}, { scopes: ["read"] }).status).toBe(400);
+  });
+});
+
 describe("hub handlers", () => {
   it("1. health responds without a token and reports deps.version", () => {
     const store = openStore();

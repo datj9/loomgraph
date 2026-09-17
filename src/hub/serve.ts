@@ -7,6 +7,7 @@ import { HubStore } from "./storage.js";
 import { exportGroups } from "./export.js";
 import { handle, type HandlerDeps } from "./handlers.js";
 import { createHttpServer, refuseBind } from "./server.js";
+import { UI_HTML } from "./ui.js";
 
 /*
  * Why this file exists separately from cli.ts: node:sqlite prints an
@@ -54,7 +55,8 @@ export function main(): Promise<Command> {
     .option("--host <h>", "host to bind", "127.0.0.1")
     .option("--data-dir <d>", "hub data directory")
     .option("--behind-tls-proxy", "trust a terminated TLS proxy in front of this bind", false)
-    .description("start the hub http server")
+    .option("--no-ui", "serve the JSON API only, without the web UI")
+    .description("start the hub http server (with a web UI on the same origin)")
     .action((opts) => {
       try {
         const host = opts.host as string;
@@ -72,9 +74,14 @@ export function main(): Promise<Command> {
         }
         const store = openStore(opts.dataDir as string | undefined);
         const deps: HandlerDeps = { store, now: () => new Date().toISOString(), version: VERSION };
-        const server = createHttpServer({ handle: (req) => handle(req, deps) });
+        const uiEnabled = opts.ui !== false;
+        const server = createHttpServer({
+          handle: (req) => handle(req, deps),
+          ui: uiEnabled ? UI_HTML : undefined,
+        });
         server.listen(port, host, () => {
           console.log(`lg-hub serving on http://${host}:${port}`);
+          if (uiEnabled) console.log(`web UI: http://${host}:${port}/  (paste a token to connect)`);
         });
         server.on("error", (err) => {
           console.error(`lg-hub fatal: ${err.message}`);

@@ -110,6 +110,15 @@ export function handle(req: WireRequest, deps: HandlerDeps): WireResponse {
     return { status: 200, body: { items: result.items, nextCursor: result.nextCursor } };
   }
 
+  // List every run across members. The web UI's runs table reads this; the
+  // per-run detail route below stays the drill-down.
+  if (req.method === "GET" && seg.length === 2 && seg[0] === "v1" && seg[1] === "runs") {
+    const member = resolveMember(deps.store, bearer(req));
+    if (member === null) return error(401, "unauthorized");
+    if (!member.scopes.includes("read")) return error(403, "forbidden");
+    return { status: 200, body: { runs: deps.store.listRuns() } };
+  }
+
   if (req.method === "GET" && seg.length === 4 && seg[0] === "v1" && seg[1] === "runs") {
     const member = resolveMember(deps.store, bearer(req));
     if (member === null) return error(401, "unauthorized");
@@ -126,6 +135,42 @@ export function handle(req: WireRequest, deps: HandlerDeps): WireResponse {
         events: deps.store.events(targetMember, row.streamId, runId),
       },
     };
+  }
+
+  // Member roster: read + create for the UI's admin screen. Creating a member is
+  // exactly what `lg-hub member add` does; this exposes it to an admin-scoped
+  // token so the roster is manageable from the browser. The minted token is
+  // returned once, same contract as the CLI.
+  if (seg.length === 2 && seg[0] === "v1" && seg[1] === "members") {
+    const member = resolveMember(deps.store, bearer(req));
+    if (member === null) return error(401, "unauthorized");
+    if (!member.scopes.includes("admin")) return error(403, "forbidden");
+    if (req.method === "GET") {
+      return { status: 200, body: { members: deps.store.listMembers() } };
+    }
+    if (req.method === "POST") {
+      const body = (req.body ?? {}) as { member?: unknown; scopes?: unknown };
+      const name = typeof body.member === "string" ? body.member.trim() : "";
+      if (name.length === 0) return error(400, "member name required");
+      const scopes = Array.isArray(body.scopes)
+        ? body.scopes.filter((s): s is string => typeof s === "string")
+        : ["ingest", "read"];
+      return { status: 200, body: deps.store.addMember(name, scopes) };
+    }
+    return error(405, "method not allowed");
+  }
+
+  if (
+    req.method === "POST" &&
+    seg.length === 4 &&
+    seg[0] === "v1" &&
+    seg[1] === "members" &&
+    seg[3] === "revoke"
+  ) {
+    const member = resolveMember(deps.store, bearer(req));
+    if (member === null) return error(401, "unauthorized");
+    if (!member.scopes.includes("admin")) return error(403, "forbidden");
+    return { status: 200, body: { revoked: deps.store.revokeMember(seg[2]!) } };
   }
 
   return error(404, "not found");

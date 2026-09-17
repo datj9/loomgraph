@@ -4,6 +4,8 @@ import { handle, type WireRequest, type WireResponse } from "./handlers.js";
 
 export interface ServeDeps {
   handle(req: WireRequest): WireResponse;
+  /** Optional self-contained web UI, served for any non-`/v1` GET (same origin). */
+  ui?: string;
 }
 
 /**
@@ -21,6 +23,10 @@ export function createHttpServer(deps: ServeDeps) {
           return;
         }
         const wire: WireRequest = buildWireRequest(req, result.body);
+        if (deps.ui !== undefined && wire.method === "GET" && !wire.path.startsWith("/v1")) {
+          writeHtml(res, deps.ui);
+          return;
+        }
         writeResponse(res, deps.handle(wire));
       })
       .catch(() => {
@@ -104,6 +110,13 @@ function readBody(
     });
     req.on("error", reject);
   });
+}
+
+function writeHtml(res: ServerResponse, html: string): void {
+  res.statusCode = 200;
+  res.setHeader("content-type", "text/html; charset=utf-8");
+  res.setHeader("referrer-policy", "no-referrer");
+  res.end(html);
 }
 
 function writeResponse(res: ServerResponse, wire: WireResponse): void {
