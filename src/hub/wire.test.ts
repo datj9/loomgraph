@@ -544,6 +544,83 @@ describe("eventBatchSchema", () => {
     });
   });
 
+  /**
+   * A node error is routinely a stack trace or a multi-line stderr dump. Refusing the
+   * whitespace controls inside one 400s the WHOLE batch, and because the sync cursor only
+   * advances on a 2xx the same batch is retried forever - that run can never sync again.
+   * Tab, newline and carriage return must therefore pass; everything the check exists to
+   * stop must still be stopped.
+   */
+  describe("CLASS 9: control characters in a node error", () => {
+    const stackTrace =
+      "Error: boom\n    at run (/app/src/core/engine.ts:12:5)\n    at main (/app/src/cli.ts:3:1)";
+
+    it("accepts a node error carrying a multi-line stack trace", () => {
+      const result = eventBatchSchema.safeParse(
+        withNode(node({ status: "failed", error: stackTrace })),
+      );
+      expect(result.success).toBe(true);
+    });
+
+    it("preserves the newlines in an accepted multi-line error byte-for-byte", () => {
+      const result = eventBatchSchema.safeParse(
+        withNode(node({ status: "failed", error: stackTrace })),
+      );
+      expect(result.success).toBe(true);
+      if (!result.success) return;
+      expect(result.data.state.nodes["n1"]?.error).toBe(stackTrace);
+    });
+
+    it.each([
+      ["tab", "command failed:\texit status 1"],
+      ["carriage return", "downloading...\rdownload failed"],
+      ["CRLF", "line one\r\nline two"],
+    ])("accepts a node error containing a %s", (_label, error) => {
+      expect(
+        eventBatchSchema.safeParse(withNode(node({ status: "failed", error }))).success,
+      ).toBe(true);
+    });
+
+    it.each([
+      ["NUL", "boom\u0000truncated"],
+      ["ESC / ANSI colour sequence", "\u001b[31mboom\u001b[0m"],
+      ["ESC / OSC terminal title sequence", "boom\u001b]0;pwned\u0007"],
+      ["BEL", "boom\u0007"],
+      ["SOH", "boom\u0001"],
+      ["vertical tab", "boom\u000bmore"],
+      ["form feed", "boom\u000cmore"],
+      ["DEL", "boom\u007f"],
+    ])("still rejects a node error containing %s", (_label, error) => {
+      expect(
+        eventBatchSchema.safeParse(withNode(node({ status: "failed", error }))).success,
+      ).toBe(false);
+    });
+
+    it("still rejects an error made only of newlines, which is empty after trimming", () => {
+      expect(
+        eventBatchSchema.safeParse(withNode(node({ status: "failed", error: "\n\n" }))).success,
+      ).toBe(false);
+    });
+
+    /**
+     * The widening is scoped to `error` alone. Identity strings keep the original refusal -
+     * a newline or tab in a run id, graph name or cwd is still a delimiter-injection shape
+     * and must stay a 400.
+     */
+    it.each(["runId", "graphName", "cwd"] as const)(
+      "still rejects a newline in state.%s",
+      (field) => {
+        const state = baseState();
+        const batch = baseBatch({ state: { ...state, [field]: `${state[field]}\nx` } });
+        expect(eventBatchSchema.safeParse(batch).success).toBe(false);
+      },
+    );
+
+    it("still rejects a tab in the top-level streamId", () => {
+      expect(eventBatchSchema.safeParse(baseBatch({ streamId: "s\t1" })).success).toBe(false);
+    });
+  });
+
   describe("must remain accepted", () => {
     it("accepts an event seq gap, e.g. [0,5]", () => {
       const events = [0, 5].map((s) => rawLine.replace('"seq":0', `"seq":${s}`));

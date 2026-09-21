@@ -98,7 +98,16 @@ function seedRun(dir: string, runId: string): { store: CheckpointStore; log: Eve
 }
 
 function makeCtx(store: CheckpointStore, runId = "fixed-run"): BatchCtx {
-  return { runId, store, opts: { home: "/home/alice", username: "alice", repoRoot: "/repo" } };
+  return {
+    runId,
+    store,
+    opts: {
+      home: "/home/alice",
+      username: "alice",
+      repoRoot: "/repo",
+      hostname: "alice-laptop.local",
+    },
+  };
 }
 
 function okFetchCalls(): { f: Fetch; calls: { count: number; batches: EventBatch[] } } {

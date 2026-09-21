@@ -11,9 +11,14 @@ const shaped = (prefix: string, body: string): string => prefix + body;
 import { describe, expect, it } from "vitest";
 import type { NodeResult, RunState } from "../core/types.js";
 import { eventBatchSchema, type EventBatch } from "../hub/wire.js";
-import { projectState } from "./project.js";
+import { projectState, safeText } from "./project.js";
 
-const OPTS = { home: "/home/alice", username: "alice", repoRoot: "/home/alice/work/repo" };
+const OPTS = {
+  home: "/home/alice",
+  username: "alice",
+  repoRoot: "/home/alice/work/repo",
+  hostname: "alice-laptop.local",
+};
 
 function baseState(): RunState {
   return {
@@ -290,6 +295,131 @@ describe("projectState", () => {
     expect(projected.nodes.a!.error).toBe("missing ${HOME}/.config/loomgraph/hub.json");
   });
 
+  it("an ANSI-coloured error is stripped clean and passes the hub's wire schema", () => {
+    // Many CLIs colour stderr by default. The hub still rejects ESC (U+001B) in
+    // a node error - deliberately, so a colour code or an OSC terminal-title
+    // sequence cannot ride in - so an uncleaned error would 400 the whole batch
+    // and wedge that run's sync forever, exactly as a newline used to.
+    const state = baseState();
+    state.nodes.a = node("a", "failed", {
+      error: "\u001b[31mbuild failed\u001b[0m in \u001b]0;title\u0007module",
+    });
+
+    const projected = projectState(state, OPTS);
+
+    expect(projected.nodes.a!.error).toBe("build failed in module");
+
+    const batch: EventBatch = {
+      runId: projected.runId,
+      streamId: state.streamId,
+      graphName: projected.graphName,
+      state: projected,
+      events: [],
+    };
+    expect(eventBatchSchema.safeParse(batch).success).toBe(true);
+  });
+
+  it("a multi-line stack trace survives intact - tab, newline and carriage return are kept", () => {
+    const trace = "Error: boom\n\tat run (/home/alice/work/repo/src/a.ts:1:1)\r\n\tat main";
+    const state = baseState();
+    state.nodes.a = node("a", "failed", { error: trace });
+
+    const projected = projectState(state, OPTS);
+
+    expect(projected.nodes.a!.error).toBe(
+      "Error: boom\n\tat run (${REPO_ROOT}/src/a.ts:1:1)\r\n\tat main",
+    );
+
+    const batch: EventBatch = {
+      runId: projected.runId,
+      streamId: state.streamId,
+      graphName: projected.graphName,
+      state: projected,
+      events: [],
+    };
+    expect(eventBatchSchema.safeParse(batch).success).toBe(true);
+  });
+
+  it("a NUL, a bell, a DEL and a vertical tab are removed while the text around them survives", () => {
+    const state = baseState();
+    state.nodes.a = node("a", "failed", { error: "a\u0000b\u0007c\u007fd\u000b" });
+
+    const projected = projectState(state, OPTS);
+
+    expect(projected.nodes.a!.error).toBe("abcd");
+  });
+
+  it("control characters are stripped BEFORE masking, so an escape spliced into a secret cannot evade the masker", () => {
+    // A colouriser can emit an escape in the middle of a token. Stripping after
+    // masking would hand the wire a reassembled, UNMASKED secret; stripping
+    // first means the masker sees the contiguous token it has a rule for.
+    const secret = shaped("sk-ant-", "api03-0000VERYFAKE0000VERYFAKE0000");
+    const spliced = `${secret.slice(0, 12)}\u001b[0m${secret.slice(12)}`;
+    const state = baseState();
+    state.nodes.a = node("a", "failed", { error: `key ${spliced}` });
+
+    const projected = projectState(state, OPTS);
+
+    expect(projected.nodes.a!.error).toBe("key sk-a...");
+    expect(projected.nodes.a!.error).not.toContain("api03");
+  });
+
+  it("the full chain runs in order: rewrite, then mask, then cap", () => {
+    // ORDER REGRESSION, pinned as one assertion because control stripping now
+    // sits in this chain and makes it easy to disturb. Capping before masking
+    // would truncate the key below its rule's `{16,}` tail and publish real
+    // characters; masking before rewriting would leave the home path intact.
+    const secret = shaped("sk-ant-", "api03-0000VERYFAKE0000VERYFAKE0000");
+    const filler = "y".repeat(190);
+    const state = baseState();
+    state.nodes.a = node("a", "failed", {
+      error: `\u001b[31m/home/alice/work/repo/a.ts ${secret} ${filler}\u001b[0m`,
+    });
+
+    const projected = projectState(state, OPTS);
+    const error = projected.nodes.a!.error!;
+
+    expect(error).not.toContain("\u001b");
+    // rewrite ran: the repo root became a placeholder
+    expect(error).toContain("${REPO_ROOT}/a.ts");
+    // mask ran, and ran before the cap: the key is 7 characters, not a fragment
+    expect(error).toContain("sk-a...");
+    expect(error).not.toContain("api03");
+    // cap ran last, on the already-rewritten, already-masked, already-stripped text
+    expect(error).toHaveLength(201);
+    expect(error.endsWith("…")).toBe(true);
+  });
+
+  it("masking runs BEFORE capping, so a secret straddling the 200-char cap cannot be published as a fragment", () => {
+    // ORDER REGRESSION. Capping first would truncate this key below its rule's
+    // `{16,}` tail, the mask would then fail to match, and the surviving
+    // prefix would publish real key material. Do not reorder rewrite/mask/cap.
+    const secret = shaped("sk-ant-", "api03-0000VERYFAKE0000VERYFAKE0000");
+    const state = baseState();
+    state.nodes.a = node("a", "failed", { error: `${"x".repeat(190)} ${secret}` });
+
+    const projected = projectState(state, OPTS);
+
+    expect(projected.nodes.a!.error).toContain("sk-a...");
+    expect(projected.nodes.a!.error).not.toContain("api03");
+    expect(projected.nodes.a!.error).not.toContain(secret.slice(0, 20));
+  });
+
+  it("d. the machine hostname is rewritten out of a projected node error", () => {
+    // BUG 1: `rewritePaths` has always had a hostname rule, but `ProjectionOpts`
+    // had no `hostname` field, so no caller could supply one and the rule never
+    // fired - a leak in the one channel that IS an allowlist.
+    const state = baseState();
+    state.nodes.a = node("a", "failed", {
+      error: "ssh alice-laptop.local: connection refused (short form alice-laptop too)",
+    });
+
+    const projected = projectState(state, OPTS);
+
+    expect(projected.nodes.a!.error).not.toContain("alice-laptop");
+    expect(projected.nodes.a!.error).toContain("${HOSTNAME}");
+  });
+
   it("a repo-root path in a node error is rewritten to the REPO_ROOT placeholder", () => {
     const state = baseState();
     state.nodes.a = node("a", "failed", {
@@ -366,5 +496,35 @@ describe("projectState", () => {
 
     const parsed = eventBatchSchema.safeParse(batch);
     expect(parsed.success).toBe(true);
+  });
+});
+describe("safeText strips control characters the wire schema refuses", () => {
+  // The hub accepts \t \n \r inside a node error (multi-line stack traces are
+  // legitimate) but still refuses the rest of C0, DEL and ESC, so ANSI colour
+  // and OSC terminal-title sequences cannot ride in. Many CLI tools colour
+  // their stderr by default, so an unsanitised ESC would 400 the batch and
+  // wedge that run's sync permanently - the same failure mode as the newline
+  // bug, reached by a different route. Stripping belongs here, producer-side.
+  it("removes ANSI colour codes so the result passes the wire schema", () => {
+    const out = safeText("\u001b[31mbuild failed\u001b[0m", OPTS);
+    expect(out).not.toMatch(/\u001b/);
+    expect(out).toContain("build failed");
+  });
+
+  it("removes OSC, BEL, NUL, VT, FF and DEL", () => {
+    const out = safeText("a\u0000b\u0007c\u000bd\u000ce\u007ff", OPTS);
+    expect(out).toBe("abcdef");
+  });
+
+  it("PRESERVES tab, newline and carriage return", () => {
+    const out = safeText("line1\nline2\tcol\r\nline3", OPTS);
+    expect(out).toBe("line1\nline2\tcol\r\nline3");
+  });
+
+  it("strips before capping, so the cap still bounds the final text", () => {
+    const noisy = `${"\u001b[31m".repeat(200)}${"x".repeat(300)}`;
+    const out = safeText(noisy, OPTS);
+    expect(out).not.toMatch(/\u001b/);
+    expect((out ?? "").length).toBeLessThanOrEqual(201);
   });
 });

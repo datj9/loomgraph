@@ -3,6 +3,23 @@ import type { ProjectedState, ProjectedNode } from "../hub/wire.js";
 import { SCAN_RULES, rewritePaths } from "../handoff/scan.js";
 
 /**
+ * The machine facts every published string is rewritten against. Mirrors
+ * `rewritePaths`' own opts (`src/handoff/scan.ts`) rather than a narrower
+ * `(state, home, repoRoot)` form, because `rewritePaths` skips a protection
+ * whenever the field it needs is empty - a narrower signature invites a caller
+ * to pass `""` and silently disable one. `hostname` is REQUIRED for exactly
+ * that reason: it was optional on `rewritePaths`, no caller on the sync path
+ * ever supplied it, and the machine hostname published unrewritten for the
+ * whole of phase 1. Do not make it optional again.
+ */
+export interface ProjectionIdentity {
+  home: string;
+  username: string;
+  repoRoot: string;
+  hostname: string;
+}
+
+/**
  * Ceiling on a published node error. 200 is the number `claude.ts:33` already
  * truncates stdout to, so it matches the largest thing the adapters
  * deliberately allow through; a multi-kilobyte stderr dump must not ride along.
@@ -33,14 +50,65 @@ function maskSecrets(text: string): string {
   return out;
 }
 
-/** Sanitise a node error for publication: paths rewritten, secrets masked, length capped. */
-function safeError(
+/**
+ * Remove control characters the hub's wire schema refuses, keeping the three
+ * that legitimately appear in error text.
+ *
+ * `projectedNodeSchema.error` permits only TAB, LF and CR; the rest of C0, DEL
+ * and ESC stay refused so ANSI colour and OSC terminal-title sequences cannot
+ * ride in. Many CLI tools colour their stderr by default, so an unsanitised ESC
+ * would 400 the batch and wedge that run's sync PERMANENTLY - the same failure
+ * as the newline bug, reached by a different route. The producer strips, and the
+ * hub keeps refusing: validation must never refuse a shape the engine can
+ * legitimately produce, and the engine must not produce one it refuses.
+ *
+ * ORDER MATTERS - this runs FIRST, before rewrite and mask. An ESC spliced into
+ * a secret or a path defeats their patterns, and stripping afterwards would
+ * reassemble the original in clear. Full order: strip -> rewrite -> mask -> cap.
+ * Do not reorder: a masked token is already `first4 + "..."`, so capping cannot
+ * reveal a fragment, but any other arrangement is exploitable.
+ */
+function stripControl(s: string): string {
+  return (
+    s
+      // OSC: ESC ] ... terminated by BEL or ST. Must run before CSI so a title
+      // sequence is consumed whole rather than leaving its payload behind.
+      .replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)?/g, "")
+      // CSI: ESC [ params intermediates final. Removing only the ESC byte would
+      // leave "[31m" in the text - and, worse, leave a spliced secret still
+      // unmatchable by the masker.
+      .replace(/\u001b\[[0-9;?]*[ -/]*[@-~]?/g, "")
+      // Any other two-byte escape.
+      .replace(/\u001b[@-_]?/g, "")
+      // Remaining C0 and DEL, keeping TAB, LF and CR.
+      .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
+  );
+}
+
+/**
+ * Sanitise a published string: paths rewritten, secrets masked, length capped.
+ *
+ * ORDER IS LOAD-BEARING - rewrite, then mask, then cap. Capping first would let
+ * a secret straddling the 200th character be truncated below its rule's
+ * `{16,}` tail, so the mask would no longer match and the surviving prefix
+ * would publish real key material. Do not reorder these three lines.
+ *
+ * Exported because `buildBatch` sanitises event `data` with the SAME function.
+ * A second implementation over there would drift from this one; there must be
+ * exactly one definition of "safe to publish" on the sync path.
+ */
+export function safeText(
   error: string | null,
-  opts: { home: string; username: string; repoRoot: string },
+  opts: ProjectionIdentity,
 ): string | null {
   if (error === null) return null;
 
-  let out = rewritePaths(error, opts);
+  // Strip FIRST. An ESC spliced into the middle of a secret or an absolute path
+  // breaks the masker's and the rewriter's patterns; stripping afterwards would
+  // then reassemble the original in clear. Removing the noise before either one
+  // runs is what makes them see the real shape.
+  let out = stripControl(error);
+  out = rewritePaths(out, opts);
   out = maskSecrets(out);
 
   if (out.length > MAX_ERROR_LENGTH) {
@@ -57,17 +125,9 @@ function safeError(
  * followed by deletes - so a future content-carrying field added to `RunState` cannot
  * silently start publishing itself.
  *
- * The signature mirrors `rewritePaths`' own opts (`{ home, username, repoRoot }`) rather than
- * the narrower `(state, home, repoRoot)` form, because `rewritePaths` rewrites the
- * `/home/<user>`, `/Users/<user>` and `C:\Users\<user>` shapes and skips all of them when
- * `username` is empty. A narrower signature invites a caller to pass `""` and silently
- * disable one of its three protections. Mirroring the opts shape keeps one vocabulary across
- * both functions and loses nothing. Do not "restore" the narrower form.
+ * `opts` is `ProjectionIdentity` - see its doc comment for why every field is required.
  */
-export function projectState(
-  state: RunState,
-  opts: { home: string; username: string; repoRoot: string },
-): ProjectedState {
+export function projectState(state: RunState, opts: ProjectionIdentity): ProjectedState {
   const nodes: Record<string, ProjectedNode> = {};
   for (const [id, node] of Object.entries(state.nodes)) {
     nodes[id] = {
@@ -76,7 +136,7 @@ export function projectState(
       startedAt: node.startedAt,
       endedAt: node.endedAt,
       attempts: node.attempts,
-      error: safeError(node.error, opts),
+      error: safeText(node.error, opts),
       costUsd: node.costUsd,
     };
   }

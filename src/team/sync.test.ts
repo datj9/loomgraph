@@ -27,7 +27,12 @@ import type { Fetch, HubConfig } from "./transport.js";
 
 const FROZEN = "2026-08-25T00:00:00.000Z";
 
-const OPTS: ProjectionOpts = { home: "/home/alice", username: "alice", repoRoot: "/work/repo" };
+const OPTS: ProjectionOpts = {
+  home: "/home/alice",
+  username: "alice",
+  repoRoot: "/work/repo",
+  hostname: "alice-laptop.local",
+};
 
 const CFG: HubConfig = { url: "http://hub.test", token: "lgt_00000000.FAKEfake0000FAKEfake0000" };
 

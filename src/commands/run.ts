@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { homedir, userInfo } from "node:os";
+import { homedir, hostname, userInfo } from "node:os";
 import { defaultRegistry } from "../adapters/registry.js";
 import { execute, makeRunId, newRunState } from "../core/engine.js";
 import { parseGraph } from "../core/graph.js";
@@ -73,7 +73,7 @@ export async function runCommand(file: string, options: RunOptions, deps: RunCom
     ctx: {
       runId,
       store,
-      opts: { home, username: userInfo().username, repoRoot: cwd },
+      opts: { home, username: userInfo().username, repoRoot: cwd, hostname: hostname() },
     } satisfies BatchCtx,
   });
 

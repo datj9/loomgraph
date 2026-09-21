@@ -1,5 +1,5 @@
 import { mkdirSync, writeFileSync } from "node:fs";
-import { homedir, userInfo } from "node:os";
+import { homedir, hostname, userInfo } from "node:os";
 import { join } from "node:path";
 import type { CheckpointStore } from "../core/store.js";
 import { syncRun, type ProjectionOpts } from "../team/sync.js";
@@ -23,6 +23,7 @@ export interface SyncOptions {
   cwd?: string;
   home?: string;
   username?: string;
+  hostname?: string;
   env?: NodeJS.ProcessEnv;
   f?: Fetch;
 }
@@ -79,6 +80,7 @@ export async function syncCommand(opts: SyncOptions = {}): Promise<number> {
       home,
       username: opts.username ?? userInfo().username,
       repoRoot: cwd,
+      hostname: opts.hostname ?? hostname(),
     },
   };
 

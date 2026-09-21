@@ -128,6 +128,27 @@ function rejectControl(s: string): boolean {
   return /[\u0000-\u001f\u007f]/.test(s);
 }
 
+/**
+ * `rejectControl` minus the three whitespace controls that legitimately occur INSIDE error
+ * text: tab (U+0009), line feed (U+000A) and carriage return (U+000D).
+ *
+ * A node error is routinely a stack trace or a multi-line stderr dump. Refusing a newline
+ * there 400s the WHOLE batch, and the sync cursor only advances on a 2xx
+ * (`src/team/sync.ts` - `syncRun` returns `{ok:false}` without writing the cursor), so the
+ * same batch is retried forever and that run can never sync again. Ordinary error output
+ * must not be a denial-of-sync.
+ *
+ * Everything the original check exists to stop is still stopped: NUL, BEL, ESC - so ANSI
+ * colour and OSC terminal-title sequences cannot ride in on an error string - vertical tab,
+ * form feed, every other C0 code point, and DEL. Identity strings (run id, stream id, graph
+ * name, cwd) keep using `rejectControl` unchanged: a tab or newline there is still a
+ * delimiter-injection shape with no legitimate producer. Do not point identityString at
+ * this function.
+ */
+function rejectControlInText(s: string): boolean {
+  return /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(s);
+}
+
 /** A node id the engine's graph parser (src/core/graph.ts) would accept. */
 const nodeIdString = z
   .string()
@@ -152,11 +173,14 @@ const projectedNodeSchema = z
     startedAt: isoInstant,
     endedAt: isoInstant.nullable(),
     attempts: z.number().int().min(1).max(MAX_ATTEMPTS),
+    // `rejectControlInText`, not `rejectControl`: see its comment. An error of only
+    // whitespace still fails, because `trim()` strips the tabs and newlines now allowed.
     error: z
       .string()
       .nullable()
-      .refine((s) => s === null || (s.trim() !== "" && !rejectControl(s)), {
-        message: "error must be null or a non-empty string",
+      .refine((s) => s === null || (s.trim() !== "" && !rejectControlInText(s)), {
+        message:
+          "error must be null or a non-empty string whose only control characters are tab, newline or carriage return",
       }),
     costUsd: z.number().nonnegative(),
   })

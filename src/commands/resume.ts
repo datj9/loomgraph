@@ -1,4 +1,4 @@
-import { homedir, userInfo } from "node:os";
+import { homedir, hostname, userInfo } from "node:os";
 import { defaultRegistry } from "../adapters/registry.js";
 import { execute, readySet } from "../core/engine.js";
 import { parseGraph } from "../core/graph.js";
@@ -80,7 +80,7 @@ export async function resumeCommand(
     ctx: {
       runId,
       store,
-      opts: { home, username: userInfo().username, repoRoot: cwd },
+      opts: { home, username: userInfo().username, repoRoot: cwd, hostname: hostname() },
     } satisfies BatchCtx,
   });
 

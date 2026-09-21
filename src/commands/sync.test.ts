@@ -1,6 +1,6 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventLog } from "../core/events.js";
 import { CheckpointStore } from "../core/store.js";
@@ -174,5 +174,43 @@ describe("lg sync --all", () => {
     expect(calls.count).toBe(3);
     expect(outs).toContain("synced 3 runs");
     expect(outs.filter((o) => o.startsWith("synced run-"))).toHaveLength(3);
+  });
+});
+describe("lg sync supplies the machine identity", () => {
+  it("16. the command threads os.hostname() through, so the hostname is rewritten out of a published error", async () => {
+    // BUG 1: `rewritePaths` had always accepted a `hostname`, but nothing on
+    // the sync path could supply one - `ProjectionOpts` had no such field - so
+    // the machine hostname published untouched out of the ONE channel that is
+    // otherwise a real allowlist. This test uses the real `hostname()` and
+    // passes NO hostname option, so it fails again the moment the production
+    // call site stops supplying it.
+    const host = hostname();
+    const runId = "run-host";
+    const state = makeState(runId);
+    state.nodes.a = {
+      nodeId: "a",
+      status: "failed",
+      startedAt: "2026-08-25T00:00:00.000Z",
+      endedAt: "2026-08-25T00:00:01.000Z",
+      attempts: 1,
+      output: null,
+      error: `ssh ${host}: connection refused`,
+      costUsd: 0,
+    };
+    new CheckpointStore(runsDir(cwd)).save(state);
+    new EventLog(runsDir(cwd)).append(runId, { kind: "run_started", data: {} });
+
+    let pushed: EventBatch | null = null;
+    const fetch: Fetch = async (_url, init) => {
+      pushed = JSON.parse(init.body ?? "null") as EventBatch;
+      return { status: 200, json: async () => ({ highWaterSeq: 0 }) };
+    };
+
+    const code = await syncCommand({ env: ENV, home, cwd, username: "alice", runId, f: fetch });
+
+    expect(code).toBe(0);
+    const error = pushed!.state.nodes.a!.error;
+    expect(error).not.toContain(host);
+    expect(error).toContain("${HOSTNAME}");
   });
 });
