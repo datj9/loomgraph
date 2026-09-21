@@ -191,6 +191,11 @@ export const SCAN_RULES: ReadonlyArray<{
     description: "Absolute home path that path rewriting did not remove",
   },
   {
+    name: "loomgraph-hub-token",
+    pattern: /\blgt_[0-9a-f]{8}\.[A-Za-z0-9_-]{32,}/,
+    description: "LoomGraph hub token (lgt_ prefix)",
+  },
+  {
     name: "residual-local-hostname",
     // Backstop for a leftover machine hostname, the same role `abs-home-path`
     // plays for a leftover home directory. Unlike a home path, an arbitrary

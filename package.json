@@ -5,7 +5,8 @@
   "type": "module",
   "bin": {
     "lg": "./dist/cli.js",
-    "lg-handoff": "./dist/handoff/cli.js"
+    "lg-handoff": "./dist/handoff/cli.js",
+    "lg-hub": "./dist/hub/cli.js"
   },
   "main": "./dist/index.js",
   "files": [
@@ -24,7 +25,7 @@
   "author": "Dat Nguyen",
   "license": "MIT",
   "engines": {
-    "node": ">=22"
+    "node": ">=22.13"
   },
   "scripts": {
     "build": "tsup",

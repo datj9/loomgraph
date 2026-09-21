@@ -4,7 +4,7 @@ import type { RunState } from "./types.js";
 
 function makeState(overrides: Partial<RunState> = {}): RunState {
   return {
-    runId: "r", graphName: "g", status: "running",
+    runId: "r", streamId: "s-1", graphName: "g", status: "running",
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
     cwd: "/tmp", vars: {},
     budget: { maxUsd: 1, maxWallClockSec: 60, maxNodeRuns: 5 },

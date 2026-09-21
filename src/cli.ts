@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import { Command } from "commander";
 import { VERSION } from "./index.js";
+import { enrollCommand } from "./commands/enroll.js";
+import { syncCommand } from "./commands/sync.js";
 import { eventsCommand } from "./commands/events.js";
 import { reportCommand } from "./commands/report.js";
 import { resumeCommand } from "./commands/resume.js";
@@ -78,5 +80,22 @@ program
   .option("--visibility <visibility>", "private or org", "private")
   .description("render a run to a self-contained html report")
   .action((runId: string, opts) => finish(reportCommand(runId, opts)));
+
+program
+  .command("enroll")
+  .argument("<url>", "hub base url")
+  .argument("<token>", "hub member token")
+  .description("store the hub identity in ~/.config/loomgraph/hub.json (mode 0600)")
+  .action((url: string, token: string) => finish(enrollCommand(url, token)));
+
+program
+  .command("sync")
+  .argument("[runId]", "id of a run to sync")
+  .option("--all", "sync every run under .loomgraph/runs/")
+  .option("--enable", "opt this repository in to hub sync (writes .loomgraph/hub.json)")
+  .description("push runs to the team hub")
+  .action((runId: string | undefined, options) =>
+    finish(syncCommand({ runId, all: options.all, enable: options.enable })),
+  );
 
 program.parse();

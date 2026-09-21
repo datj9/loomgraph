@@ -3,7 +3,8 @@
  *
  * This subtree is deliberately import-clean: nothing under `src/handoff/`
  * imports from `src/core/` or `src/adapters/`, so it can be extracted into a
- * sibling package with a `git mv` once a team fabric exists outside this repo.
+ * sibling package with a `git mv`; once extracted, the hub depends on that
+ * sibling package, not on this repo.
  */
 
 export type HandoffAdapter = "claude" | "codex" | "opencode";
