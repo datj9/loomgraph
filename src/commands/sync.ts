@@ -3,14 +3,20 @@ import { homedir, hostname, userInfo } from "node:os";
 import { join } from "node:path";
 import type { CheckpointStore } from "../core/store.js";
 import { syncRun, type ProjectionOpts } from "../team/sync.js";
-import { loadHubConfig, type Fetch, type HubConfig } from "../team/transport.js";
+import {
+  loadHubConfig,
+  repoSyncEnabled,
+  type Fetch,
+  type HubConfig,
+} from "../team/transport.js";
 import { openStore, runsDir } from "./context.js";
 
 /**
  * EXIT CODES - `lg sync` owns 0, 1 and 2, and nothing else:
  *   0  everything synced (or `--enable` succeeded)
  *   1  usage error: no runId and no --all and no --enable, a runId and --all
- *      together, an unknown runId, or the hub is not configured
+ *      together, an unknown runId, the repo has not opted in, or the hub is
+ *      not configured
  *   2  at least one sync failed
  * Never 3 or 4 - those are budget-exceeded and paused, and they belong to
  * `lg run`.
@@ -59,6 +65,27 @@ export async function syncCommand(opts: SyncOptions = {}): Promise<number> {
   }
   if (opts.runId === undefined && !opts.all) {
     console.error("nothing to sync - pass a run id, or --all (and --enable to opt a repo in first)");
+    return 1;
+  }
+
+  // THE REPO OPT-IN GATES EVERY PUSH PATH, NOT JUST THE LIVE ONE.
+  //
+  // `repoSyncEnabled` used to be consulted only by the live batcher
+  // (`src/team/batch.ts`), so `lg sync <runId>` and `lg sync --all` would
+  // happily push a repo that had never run `lg sync --enable`. The hub's
+  // `events` table carries no-update/no-delete triggers: a run pushed out of a
+  // repo nobody meant to share cannot be retracted, and every read-scoped
+  // member can see it. "I forgot this repo was not opted in" has to be
+  // impossible, not merely documented.
+  //
+  // Checked BEFORE `loadHubConfig` deliberately. When neither the opt-in nor
+  // the enrollment exists, the opt-in is the more specific problem and the one
+  // the operator is deciding about; naming `lg enroll` first would send them
+  // to configure a hub this repo still would not push to.
+  if (!repoSyncEnabled(cwd)) {
+    console.error(
+      `hub sync is not enabled for ${cwd} - run: lg sync --enable (this repo has never opted in)`,
+    );
     return 1;
   }
 

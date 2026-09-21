@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventLog } from "../core/events.js";
@@ -46,6 +46,12 @@ function seedRun(runId: string): void {
 
 function optInPath(): string {
   return join(cwd, ".loomgraph", "hub.json");
+}
+
+/** Opt the temp repo in, the same way `lg sync --enable` does. */
+function seedOptIn(): void {
+  mkdirSync(join(cwd, ".loomgraph"), { recursive: true });
+  writeFileSync(optInPath(), '{"sync":true}\n', { encoding: "utf8" });
 }
 
 function runAwareFetch(failRun?: string): { fetch: Fetch; calls: { count: number } } {
@@ -115,12 +121,14 @@ describe("lg sync usage errors", () => {
 
   it("10. hub not configured -> 1", async () => {
     seedRun("run-a");
+    seedOptIn();
     const code = await syncCommand({ ...base(), env: {}, home: join(tmp, "absent-home") });
     expect(code).toBe(1);
   });
 
   it("11. an unknown runId -> 1", async () => {
     seedRun("run-a");
+    seedOptIn();
     const code = await syncCommand({ ...base(), runId: "ghost" });
     expect(code).toBe(1);
   });
@@ -129,6 +137,7 @@ describe("lg sync usage errors", () => {
 describe("lg sync <runId>", () => {
   it("12. a successful single-run sync -> 0", async () => {
     seedRun("run-a");
+    seedOptIn();
     const { fetch, calls } = runAwareFetch();
     const code = await syncCommand({ ...base(), runId: "run-a", f: fetch });
     expect(code).toBe(0);
@@ -137,6 +146,7 @@ describe("lg sync <runId>", () => {
 
   it("13. a failing single-run sync -> 2", async () => {
     seedRun("run-a");
+    seedOptIn();
     const { fetch, calls } = runAwareFetch("run-a");
     const code = await syncCommand({ ...base(), runId: "run-a", f: fetch });
     expect(code).toBe(2);
@@ -149,6 +159,7 @@ describe("lg sync --all", () => {
     seedRun("run-a");
     seedRun("run-b");
     seedRun("run-c");
+    seedOptIn();
     const { fetch, calls } = runAwareFetch("run-b");
     const { outs, errs } = captureConsole();
 
@@ -165,6 +176,7 @@ describe("lg sync --all", () => {
     seedRun("run-a");
     seedRun("run-b");
     seedRun("run-c");
+    seedOptIn();
     const { fetch, calls } = runAwareFetch();
     const { outs } = captureConsole();
 
@@ -199,6 +211,7 @@ describe("lg sync supplies the machine identity", () => {
     };
     new CheckpointStore(runsDir(cwd)).save(state);
     new EventLog(runsDir(cwd)).append(runId, { kind: "run_started", data: {} });
+    seedOptIn();
 
     let pushed: EventBatch | null = null;
     const fetch: Fetch = async (_url, init) => {
@@ -212,5 +225,72 @@ describe("lg sync supplies the machine identity", () => {
     const error = pushed!.state.nodes.a!.error;
     expect(error).not.toContain(host);
     expect(error).toContain("${HOSTNAME}");
+  });
+});
+
+describe("lg sync honours the repo opt-in", () => {
+  // BUG 5: `repoSyncEnabled` gated only the live batcher (`src/team/batch.ts`).
+  // `lg sync <runId>` and `lg sync --all` never consulted it, so a repo that
+  // had never run `lg sync --enable` could still push every run it had. The
+  // hub's `events` table has no-update/no-delete triggers, which makes "I
+  // forgot this repo was not opted in" permanent and visible to every
+  // read-scoped member. The opt-in must gate every push path, not one of them.
+
+  it("17. a run id in a repo that never opted in -> 1, nothing is pushed, and the message names --enable", async () => {
+    seedRun("run-a");
+    const { fetch, calls } = runAwareFetch();
+    const { errs } = captureConsole();
+
+    const code = await syncCommand({ ...base(), runId: "run-a", f: fetch });
+
+    expect(code).toBe(1);
+    expect(calls.count).toBe(0);
+    expect(errs.some((e) => e.includes("lg sync --enable"))).toBe(true);
+  });
+
+  it("18. --all in a repo that never opted in -> 1 and pushes nothing, even with runs present", async () => {
+    seedRun("run-a");
+    seedRun("run-b");
+    const { fetch, calls } = runAwareFetch();
+    captureConsole();
+
+    const code = await syncCommand({ ...base(), all: true, f: fetch });
+
+    expect(code).toBe(1);
+    expect(calls.count).toBe(0);
+  });
+
+  it("19. the gate is checked BEFORE the hub config, so an un-opted repo reports the opt-in rather than the enrollment", async () => {
+    // Both conditions hold at once. The opt-in is the local consent decision
+    // and the more specific fix, so it is what the operator is told about.
+    seedRun("run-a");
+    const { errs } = captureConsole();
+
+    const code = await syncCommand({ ...base(), env: {}, home: join(tmp, "absent-home"), runId: "run-a" });
+
+    expect(code).toBe(1);
+    expect(errs.some((e) => e.includes("lg sync --enable"))).toBe(true);
+    expect(errs.some((e) => e.includes("lg enroll"))).toBe(false);
+  });
+
+  it("20. a hub.json whose sync flag is not exactly true does not count as opting in", async () => {
+    seedRun("run-a");
+    mkdirSync(join(cwd, ".loomgraph"), { recursive: true });
+    writeFileSync(optInPath(), '{"sync":"true"}\n', { encoding: "utf8" });
+    const { fetch, calls } = runAwareFetch();
+    captureConsole();
+
+    expect(await syncCommand({ ...base(), runId: "run-a", f: fetch })).toBe(1);
+    expect(calls.count).toBe(0);
+  });
+
+  it("21. --enable then sync works in one sequence", async () => {
+    seedRun("run-a");
+    const { fetch, calls } = runAwareFetch();
+    captureConsole();
+
+    expect(await syncCommand({ ...base(), enable: true })).toBe(0);
+    expect(await syncCommand({ ...base(), runId: "run-a", f: fetch })).toBe(0);
+    expect(calls.count).toBe(1);
   });
 });

@@ -530,6 +530,11 @@ lg sync <runId>                         # push one run
 lg sync --all                           # or every run under .loomgraph/runs/
 ```
 
+`lg sync --enable` is a hard gate, not a hint: without `.loomgraph/hub.json` in
+the repo, `lg sync <runId>` and `lg sync --all` both refuse and push nothing. The
+hub cannot delete an event once ingested, so opting in has to be a deliberate act
+per repo rather than something a forgotten flag decides for you.
+
 The rest of the hub-facing surface: `lg-hub member revoke <keyId>` and
 `lg-hub member ls` for the roster, `lg-hub export --jsonl` to print the raw stored
 lines to stdout for grepping, and `lg-hub export --out <dir>` to write one
