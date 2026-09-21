@@ -1,0 +1,86 @@
+[Unit]
+Description=loomgraph team hub (lg-hub)
+After=network-online.target netbird.service
+Wants=network-online.target netbird.service
+
+[Service]
+Type=simple
+User=lghub
+Group=lghub
+
+# DATA DIRECTORY - must be explicit.
+# resolveDataDir() (src/hub/serve.ts) falls back to $HOME/.local/share/
+# loomgraph-hub when neither --data-dir nor LOOMGRAPH_HUB_DIR is set. That
+# default is broken for this unit: lghub is a system account whose home IS
+# /var/lib/lghub, and ProtectHome=yes makes the usual home paths unreadable
+# anyway. --data-dir on ExecStart below is authoritative; this env var is a
+# backstop so any lg-hub process started in this unit's environment lands on
+# the same store even if ExecStart is later edited.
+Environment=LOOMGRAPH_HUB_DIR=/var/lib/lghub
+
+# ---------------------------------------------------------------------------
+# READ THIS BEFORE CHANGING --behind-tls-proxy OR THE BIND ADDRESS.
+#
+# There is NO TLS proxy in front of this service. Nothing terminates TLS for
+# it, and nothing is planned to. The flag's name is misleading; it is passed
+# for the reason below, not because a proxy exists.
+#
+# @MESH_IP@ - rendered by install-hub.sh from LOOMGRAPH_HUB_IP - is a NetBird
+# (WireGuard) mesh address. Every packet between mesh peers is already
+# encrypted by WireGuard (ChaCha20-Poly1305), and the
+# address is not routable from the public internet - public exposure on this
+# host is limited to 22/80/443, and 8369 is bound to the mesh address only.
+# That is what protects the bearer token on the wire.
+#
+# --behind-tls-proxy affects exactly ONE thing: the startup bind check in
+# refuseBind() (src/hub/server.ts), which otherwise refuses any non-loopback
+# bind on the grounds that a bearer token would cross plaintext HTTP. It is
+# read once at startup (src/hub/serve.ts) and never again. There is NO
+# request-time behaviour attached to it: the server does not read
+# X-Forwarded-For, X-Real-IP, or any other proxy header, and does not derive
+# identity, address, or scheme from request headers. Passing the flag
+# therefore cannot introduce a header-spoofing vector.
+#
+# THIS REASONING DEPENDS ON THE MESH. If NetBird is removed, or this service
+# is rebound to a routable address, the justification is void and the flag
+# MUST be removed (and the transport decision re-made) before that change
+# ships.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# WHY --no-ui.
+#
+# `lg-hub serve` serves a web UI on the SAME ORIGIN as the JSON API by default
+# (src/hub/serve.ts). That UI stores the member bearer token in localStorage
+# (src/hub/ui.ts: TOKEN_KEY = "lg-hub-token") against an http:// origin, and
+# the API it drives includes POST /v1/members, which mints a NEW member token
+# for any caller holding an admin-scoped token (src/hub/handlers.ts).
+#
+# Persisting a bearer token in localStorage on a plaintext origin, next to a
+# token-minting endpoint, is a materially larger blast radius than the JSON API
+# alone - any XSS or hostile page reachable on that origin reads the token and
+# can mint more. The hub has no browser-facing use case here, so the UI is
+# switched off rather than accepted. Re-enabling it means re-doing this
+# assessment, not just deleting a flag.
+# ---------------------------------------------------------------------------
+
+# Invoke the lg-hub bin (dist/hub/cli.js), never dist/hub/serve.js directly:
+# cli.js installs a process warning filter before the node:sqlite import graph
+# is evaluated. Bypassing it reintroduces an ExperimentalWarning on every start.
+# The host and port below are substituted by install-hub.sh, from
+# LOOMGRAPH_HUB_IP and LOOMGRAPH_HUB_PORT in deploy/hub.env, when it renders this
+# template into /etc/systemd/system/. Editing the installed unit by hand works,
+# but the next install-hub.sh run overwrites it - change deploy/hub.env instead.
+ExecStart=/usr/bin/lg-hub serve --host @MESH_IP@ --port @HUB_PORT@ --behind-tls-proxy --data-dir /var/lib/lghub --no-ui
+
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/lghub
+
+[Install]
+WantedBy=multi-user.target
