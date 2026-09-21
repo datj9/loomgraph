@@ -247,6 +247,10 @@ destroyed afterwards, and delete it there once they are connected.
 
 --- give them this ---------------------------------------------------------
 
+0. Send them docs/member-quickstart.md - it is these steps, in full, with the
+   troubleshooting for the ones that reliably go wrong. The rest of this block
+   is the short form.
+
 1. Install NetBird: https://docs.netbird.io/how-to/installation
 
 2. Join the mesh. 'netbird up' SILENTLY IGNORES these flags if the client is
@@ -269,7 +273,7 @@ destroyed afterwards, and delete it there once they are connected.
 
      lg sync --enable
 
-   Have them read docs/hub-onboarding.md BEFORE step 5, not after. What
+   Have them read docs/hub-onboarding.md BEFORE this step, not after. What
    reaches the hub is readable by every member and can never be deleted.
 
 ----------------------------------------------------------------------------

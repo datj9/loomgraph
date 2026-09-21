@@ -520,6 +520,14 @@ one: `hub.db`, `hub.db-wal` and `hub.db-shm`. Copying `hub.db` alone while the
 server is running gives you a backup missing every committed write still in the
 WAL. Use `VACUUM INTO` (or stop the service first).
 
+Onboarding a colleague is two grants, not one — a NetBird peer in the members
+group, and a hub token. `deploy/enroll-member.sh` does the first,
+`lg-hub member add` the second, and
+[docs/hub-operations.md](docs/hub-operations.md) is the operator runbook for
+both. Hand the new member [docs/member-quickstart.md](docs/member-quickstart.md)
+(the commands) and [docs/hub-onboarding.md](docs/hub-onboarding.md) (what
+syncing shares).
+
 On a member machine:
 
 ```bash

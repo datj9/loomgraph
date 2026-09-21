@@ -245,15 +245,17 @@ Tell the recipient two things when you hand it over:
 
 ### 3. Hand it over
 
-Send all three together, and point them at
-[hub-onboarding.md](./hub-onboarding.md) **before** they run `lg sync --enable`,
-not after — that is the irreversible step.
+Send all four together:
 
-1. `docs/hub-onboarding.md`
-2. The setup key
-3. The hub token
+1. [member-quickstart.md](./member-quickstart.md) — every command they run, in
+   order, with troubleshooting
+2. [hub-onboarding.md](./hub-onboarding.md) — what syncing actually shares.
+   Point at this one explicitly: it gates step 5 of the quickstart, and it is
+   the only irreversible decision in the process
+3. The setup key — single use, 24h
+4. The hub token — printed once
 
-Their own command sequence is printed by `enroll-member.sh --apply`. The step
+Their own command sequence is also printed by `enroll-member.sh --apply`. The step
 that reliably goes wrong is `netbird up`: it silently ignores its flags when the
 client is already connected, printing "Already connected" and dropping them.
 `netbird down` first. There is no `netbird set`.
