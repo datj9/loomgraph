@@ -19,11 +19,15 @@ It does not call a model itself. Your agent CLIs are the runtime.
 
 ## Install
 
+Not published to npm. Build it from a clone and link the binaries:
+
 ```bash
-npm i -g loomgraph
+git clone https://github.com/datj9/loomgraph && cd loomgraph
+npm install && npm run build
+npm link            # or: npm pack && npm i -g ./loomgraph-0.1.0.tgz
 ```
 
-Requires Node >= 22. The binary is `lg`.
+Requires Node >= 22. Three binaries land on your PATH: `lg`, `lg-handoff` and `lg-hub`.
 
 ## 60-second quickstart
 
@@ -495,7 +499,7 @@ names because that stdout shape has not yet been captured from a real invocation
 
 ## The hub
 
-The third binary is `lg-hub`: an HTTP API in front of a single SQLite database. It
+The third binary is `lg-hub`: an HTTP API in front of one SQLite database. It
 stores what members push and serves reads out of that store - it never runs an agent.
 Agents run on the member's own machine, started by the member; the hub has no way to
 start one, and that absence is the design. A daemon that can only store and route is a
@@ -508,8 +512,13 @@ On the hub host:
 ```bash
 lg-hub init                      # create the data dir and hub.db
 lg-hub member add alice          # prints alice's token once - write it down
-lg-hub serve                     # binds 127.0.0.1:8369
+lg-hub serve                     # binds 127.0.0.1:8369, web UI on the same origin
 ```
+
+That database runs in WAL mode, so the hub's state on disk is **three** files, not
+one: `hub.db`, `hub.db-wal` and `hub.db-shm`. Copying `hub.db` alone while the
+server is running gives you a backup missing every committed write still in the
+WAL. Use `VACUUM INTO` (or stop the service first).
 
 On a member machine:
 
@@ -528,15 +537,28 @@ lines to stdout for grepping, and `lg-hub export --out <dir>` to write one
 
 ### What the hub receives
 
-A sync pushes two things: the run's event lines verbatim - the same JSONL that sits
-under `.loomgraph/runs/<runId>/events.jsonl` - and a projection of the run state. The
-projection is where content stops. It is built field by field, never as a filtered
-copy of the full state, so there is no field a `vars` value or a node `output` could
-ride in on:
+A sync pushes two things, and **both** are filtered on the way out:
+
+**The run state projection.** Built field by field, never as a filtered copy of the
+full state, so there is no field a `vars` value or a node `output` could ride in on:
 
 - `vars` reach the hub as key names only.
 - node `output` never reaches the hub.
-- node `error` is path-rewritten, secret-masked, and capped at 200 characters.
+- node `error` is control-stripped, path-rewritten, secret-masked, and capped at 200
+  characters.
+
+**The run's event lines.** These are *not* pushed verbatim. Each line is rebuilt
+against a per-kind allowlist of `data` fields before it leaves the machine; a field
+not on the list is dropped, and a line whose `kind` the allowlist does not know is
+dropped whole. Fields carrying operator or environment text - `node_finished.error`
+and `run_finished.error` (an adapter folds the agent's full result text and stderr
+into these), `run_started.cwd`, the interpolated `human_requested.question`, and
+`human_resolved.answer` - go through the same strip/rewrite/mask/cap as a node error.
+
+The filtering happens at **push** time, not at emission. Your local
+`.loomgraph/runs/<runId>/events.jsonl` keeps its raw values for debugging; only the
+copy crossing to the hub is sanitised. `lg-hub export` still reproduces the *ingested*
+lines byte for byte - those lines simply no longer carry secrets.
 
 Same error before and after:
 
@@ -557,6 +579,19 @@ like an SSH key, and `member revoke <keyId>` is the off switch.
 `--behind-tls-proxy` is passed. A bearer token over plaintext non-loopback HTTP is
 exactly the credential shape this project's own scanner has a rule for, so a bind that
 would put the token on the wire without TLS is an error rather than an option.
+
+### The web UI ships, and it is on by default
+
+`lg-hub serve` serves a self-contained web UI on the same origin as the API - one
+embedded HTML document, no build step, no external requests. It renders runs, the
+activity feed and the member roster using `textContent` only, so an untrusted
+transcript cannot inject markup. Pass `--no-ui` for an API-only bind.
+
+It authenticates with a bearer token you paste, and **keeps that token in
+`localStorage`**. On the default loopback bind that is fine. Behind
+`--behind-tls-proxy` on a plaintext `http://` origin it is not: the token sits in
+browser storage on an origin anyone on that network can impersonate. Terminate TLS in
+front of it, or run `--no-ui`.
 
 ### Two caveats, stated up front
 
@@ -583,7 +618,6 @@ Both of these were run end to end against the built binary with a live hub:
 ### What phase 1 does not ship
 
 - No inbox - that is phase 3.
-- No web UI - that is phase 4.
 - No briefs on the hub, no encryption at rest, and no redaction on read - all phase 2.
   Nothing in phase 1 is encrypted.
 - No full transcripts, ever. The handoff refusal stands unchanged: a transcript is a
@@ -594,8 +628,8 @@ Both of these were run end to end against the built binary with a live hub:
 - **Not a model, and not an SDK for one.** loomgraph makes zero API calls of its own and has no LLM SDK dependency.
 - **Not a replacement for your agent CLI.** It shells out to the CLI you already installed and authenticated.
 - **Not a workflow server.** A daemon ships in phase 1 - `lg-hub` - but it stores and
-  routes, and never runs an agent. No web UI (phase 4), no cloud, no plugin system in
-  v0.1.
+  routes, and never runs an agent. It ships a web UI over its own store - reads, plus member add/revoke; no
+  cloud, and no plugin system in v0.1.
 
 `lg report --publish` does not change that: it writes a static file and shells out to the
 `enclave` cli the same way a node shells out to `claude`. If `enclave` is not installed the
