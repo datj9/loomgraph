@@ -15,3 +15,6 @@ SHARE-URL.txt
 # deploy/hub.env holds one deployment's real addresses: mesh IPs, the control
 # plane URL, SSH fallbacks. Copy deploy/hub.env.example and fill it in locally.
 deploy/hub.env
+
+# npm pack output: the install artifact deploy/install-hub.sh consumes.
+*.tgz
