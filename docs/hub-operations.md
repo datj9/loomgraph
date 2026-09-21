@@ -159,11 +159,52 @@ simply unreachable until the mesh is up. See "wt0 down at boot" below.
 
 ## Membership
 
-### Add a member
+Every member needs **two independent grants**, and neither is useful alone. A
+token without mesh access cannot reach the port; mesh access without a token
+gets a 401.
 
-Do this only after the member's NetBird peer exists, is in the
-`loomgraph-members` group, and has been verified to reach `$HUB_IP:8369`
-and nothing else. Network access first, hub token second — never the reverse.
+| Layer | Grants | Tool |
+| --- | --- | --- |
+| Network | Their peer may send packets to `$HUB_IP:8369` | `deploy/enroll-member.sh` (operator machine) |
+| Identity | The hub accepts and answers their requests | `lg-hub member add` (hub host) |
+
+Do the network half **first**. A token that exists before its owner can reach
+the hub is a credential sitting in a chat window waiting for a network change to
+make it live.
+
+### 1. Add the NetBird peer
+
+For a colleague with no peer yet, mint a one-off setup key that auto-joins the
+members group. Dry-run first — every write in these scripts is opt-in:
+
+```bash
+deploy/enroll-member.sh --new hoang.luong            # dry-run, prints the API call
+deploy/enroll-member.sh --new hoang.luong --apply    # creates it, prints the key ONCE
+```
+
+The key is single-use and expires in 24h (`LOOMGRAPH_SETUP_KEY_EXPIRY`). Its
+`auto_groups` puts the peer into `loomgraph-members` at join time, so there is no
+window in which a peer is on the mesh but ungrouped, and no second step to
+forget.
+
+For someone already on the mesh, add their existing peer instead:
+
+```bash
+deploy/enroll-member.sh --peer hoangs-mbp --apply    # by name, hostname, mesh IP or id
+```
+
+Check who is in the group at any time:
+
+```bash
+deploy/enroll-member.sh --list
+```
+
+An empty group right after issuing a setup key is normal — `auto_groups` applies
+when the peer actually connects, not when the key is created.
+
+### 2. Add the hub member
+
+Do this only after the peer exists and is in the `loomgraph-members` group.
 
 ```bash
 sudo -u lghub lg-hub member add alice --data-dir /var/lib/lghub
@@ -201,6 +242,33 @@ Tell the recipient two things when you hand it over:
   the config file — both must be set or neither is used.
 - Pasting the token into the web UI stores it in that browser's `localStorage`, in
   clear, on a plain `http://` origin.
+
+### 3. Hand it over
+
+Send all three together, and point them at
+[hub-onboarding.md](./hub-onboarding.md) **before** they run `lg sync --enable`,
+not after — that is the irreversible step.
+
+1. `docs/hub-onboarding.md`
+2. The setup key
+3. The hub token
+
+Their own command sequence is printed by `enroll-member.sh --apply`. The step
+that reliably goes wrong is `netbird up`: it silently ignores its flags when the
+client is already connected, printing "Already connected" and dropping them.
+`netbird down` first. There is no `netbird set`.
+
+### 4. Verify, from their machine
+
+```bash
+deploy/enroll-member.sh --list                  # operator: their peer appears
+deploy/netbird-acl.sh --verify --from-member    # THEIR machine
+```
+
+`--from-member` is the only way to prove the negative criteria — that a member
+reaches the hub on tcp/8369 and nothing else, including the operator MacBooks. It
+proves nothing from the operator machine, which is in `personal macbooks` and is
+supposed to reach everything.
 
 ### List members
 
